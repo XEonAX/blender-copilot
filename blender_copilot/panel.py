@@ -369,20 +369,23 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
 
         if session.running_tool is not None:
             # Name both cases rather than claiming a blanket "cannot be
-            # interrupted". The click is genuinely not delivered while exec owns
-            # the main thread, but what happens after that differs by kind: a
-            # blocking C call is never stoppable, while a pure-Python loop
-            # becomes stoppable once a call budget is enforced (measured in
-            # ticket 17: SIGALRM stops `while True: pass`, `time.sleep` and a
-            # blocking recv at 1.04x overhead, and cannot stop a long native
-            # call until it returns). A half-true honesty claim is worse than a
-            # blunt one, so the panel says which is which.
-            note = layout.column()
-            note.enabled = False
-            row = note.row()
-            row.label(text="running code - click not processed until it returns", icon="TIME")
-            note.label(text="a blocking C call can never be stopped; a pure-Python")
-            note.label(text="loop can be, once a per-call budget is enforced")
+            # interrupted" (measured in ticket 17: SIGALRM stops `while True:
+            # pass`, `time.sleep` and a blocking recv at 1.04x overhead, and
+            # cannot stop a long native call until it returns).
+            #
+            # Every line is short and inside a box on purpose. Blender
+            # MIDDLE-CLIPS a label that does not fit, which is how the first
+            # version of this note shipped reading "running code - c...ed until
+            # it returns". No headless test can catch that: the stub UILayout
+            # counts widgets, not pixels, so text that overflows its width is
+            # structurally perfect and visually broken.
+            note = layout.box()
+            head = note.row()
+            head.enabled = False
+            head.label(text="running code", icon="TIME")
+            note.label(text="Click waits until the call returns.")
+            note.label(text="A blocking C call never stops.")
+            note.label(text="A Python loop can, with a call budget.")
 
     def _draw_coverage(self, layout):
         box = layout.box()
