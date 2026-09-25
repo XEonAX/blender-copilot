@@ -81,6 +81,74 @@ rendered = roles.visible_lines()
 check("user lines are marked", rendered[0].startswith(">"))
 check("assistant lines are marked", "| there" in rendered)
 
+# ---------------------------------------------------------------- paging
+paged = conversation.Conversation()
+for index in range(12):
+    paged.messages.append(conversation.Message("user", f"turn {index}"))
+    paged.messages.append(conversation.Message("assistant", f"reply {index}"))
+page, hidden, has_older, has_newer = paged.page_view()
+check("the newest page is last", page[-1].text == "reply 11")
+check("a long transcript has an older page", has_older and hidden > 0)
+check("the newest page has no newer page", not has_newer)
+paged.older()
+older_page, older_hidden, _, older_has_newer = paged.page_view()
+check("Older moves back exactly one page", older_hidden < hidden)
+check("Older names the newer direction", older_has_newer)
+paged.newest()
+check("newest returns to the end", paged.page_view()[1] == hidden)
+check("pages keep whole turns", all(len(page) <= len(paged.messages) for page in paged._pages()))
+paged.newer()
+check("newer clamps at the newest page", paged.page == 0)
+
+# ---------------------------------------------------------------- kinds
+rich = conversation.Conversation()
+rich.messages.extend(conversation._demo())
+rich.last_receipt = None
+kinds = {message.kind for message in rich.messages}
+check(
+    "the demo covers every rendered kind",
+    kinds
+    == {
+        conversation.KIND_USER,
+        conversation.KIND_ASSISTANT,
+        conversation.KIND_CODE,
+        conversation.KIND_TOOL,
+        conversation.KIND_ERROR,
+    },
+)
+check("the demo carries a running tool", rich.running_tool is not None)
+check("a running tool shows in the status", rich.status == "running code")
+log = rich.visible_lines()
+check("collapse hides code bodies from the log", not any("scale = 1.3" in line for line in log))
+rich.toggle(rich.messages.index(rich.running_tool))
+check("toggle mutates expansion", rich.running_tool.expanded)
+exported = rich.transcript_text()
+check("the export keeps code verbatim", "scale = 1.3" in exported)
+check("the export keeps tracebacks verbatim", "TypeError" in exported)
+check("the export is not truncated", not exported.startswith("..."))
+
+# ---------------------------------------------------------------- stable paging
+stable = conversation.Conversation()
+stable.messages.extend(conversation._demo())
+before = [len(page) for page in stable._pages()]
+for message in stable.messages:
+    message.expanded = not message.expanded
+check("expanding detail never reflows the page", [len(page) for page in stable._pages()] == before)
+for message in stable.messages:
+    message.expanded = False
+
+# ---------------------------------------------------------------- cancel
+running = conversation.Conversation()
+running.send("hello")
+running.advance()
+partial = running.messages[-1].text
+running.cancel()
+check("cancel stops the stream", not running.streaming)
+check("cancel keeps the partial text", running.messages[-1].text.startswith(partial))
+check("cancel marks the turn stopped", running.messages[-1].text.endswith("[stopped]"))
+check("cancel is idempotent", (running.cancel(), running.streaming)[1] is False)
+check("cancel clears the busy kind", running.busy_kind is None)
+
 # ---------------------------------------------------------------- clearing
 roles.clear()
 check("clear empties the conversation", roles.messages == [] and roles.status == "idle")

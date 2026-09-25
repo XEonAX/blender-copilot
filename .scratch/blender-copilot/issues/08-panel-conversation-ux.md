@@ -1,7 +1,7 @@
 # How a conversation is laid out and controlled
 
 Type: prototype
-Status: open
+Status: resolved
 Blocked by: none
 
 ## Question
@@ -21,6 +21,110 @@ Deliverable: the chosen layout and why the rejected alternatives lost.
 
 ## Answer
 
-<!-- recorded on resolution; not written at chart time -->
+**Chosen: `boxes` — labelled user turns, one bordered box per assistant turn,
+collapsed detail rows, bounded pages.** Built at `blender_copilot/panel.py`
+(live switch: *Layout (prototype)* at the bottom of the panel). The other two
+variants are in the same file and stay as a comparison surface: `log` (flat
+prefixed text) and `external` (controls only; transcript in a Text datablock).
+
+**What was verified, and how.** Headless probes against the installed 5.2.2:
+`UILayout` has `box`, `row`, `separator`, `alert`, `label(icon=)` and 1033 valid
+icon names (the 13 used were checked); `bpy.ops.ed.undo_history` exists and the
+default keymap binds it to **Ctrl+Alt+Z**
+(`.../5.2/scripts/presets/keyconfig/keymap_data/blender_default.py:865`), with
+Blender's Edit menu already exposing `ed.undo`/`redo`/Undo History
+(`.../5.2/scripts/startup/bl_ui/space_topbar.py:515-521`); `bpy.data.texts`
+`new`/`clear`/`write`/`as_string` work. All three layouts' draw bodies run for
+every message kind, expanded and collapsed, via a stub `UILayout`
+(`tools/panel_draw_smoke.py`); 39 CPython checks pass; the manifest validates and
+the package builds. **Not verified, needs eyes:** how it looks, the textbox, the
+`Show code` area split, streaming smoothness, and the undo probe.
+
+### 1. Role distinction
+Role header with an icon (`USER` / `BLENDER`), plus structure: the user turn is
+unboxed, the assistant's *whole turn* is one `layout.box()`. Rejected: colour (no
+API), glyph prefixes alone (`log` — boundaries vanish once prose wraps), and
+`alert` for roles (reserved for errors).
+
+### 2. Code and its output
+**Code does not really fit in the panel.** The default sidebar is 280 px; the
+prototype's manual wrap budget is ~38 chars, minus the box inset ~34 — code lines
+are 40-80 chars, there is no monospace, and overlong labels clip. So the panel
+shows code *identity*, not code: `▸ Scale Cube 1.3x on Z · 10 lines`, expandable
+inline for short snippets, and the full unwrapped text is mirrored into the
+addon-owned **`Copilot Code`** Text datablock, with `Show code` opening a Text
+Editor (splitting one if none). Rejected: always-inline full code (floods a
+non-scrolling panel and still clips); a Text Editor as the *only* code surface
+(loses adjacency to the tool call that ran it); never showing code in the panel.
+Note the honesty point: with no approval gate the transcript is an **audit**
+surface, not a review surface — reading before running is exactly what ticket
+12's full-power approval buys.
+
+### 3. Running vs finished tool calls
+One permanent row per call, never removed: `TIME` + purpose + `running…` →
+`CHECKMARK` + purpose, output collapsed behind a toggle; failure → `ERROR` +
+`alert` + collapsed traceback. Rejected: live-streaming tool stdout (**impossible**
+— exec is synchronous on the main thread and the event loop does not pump, so
+nothing can repaint mid-call) and transient spinners (lose the receipt).
+**Consequence for ticket 09:** the loop must be a per-tick state machine with one
+tool call per timer callback; a blocking round-loop can never draw the running
+state at all.
+
+### 4. Errors
+A failed `bpy` call → tool row with `ERROR` + `alert`, traceback collapsed inside.
+A failed API call → its own transcript block (icon `ERROR`, request error, JSON
+detail), turn marked incomplete, partial reply kept. Nothing auto-retries; the
+user resends. Errors never clear or truncate the transcript. Rejected: status-bar
+message (vanishes), panel-wide alert (destroys the turn's context), separate
+error log.
+
+### 5. Revert affordance
+**Teach Ctrl+Z; do not add a Revert button.** Per mutating turn: a receipt
+(`✓ Undoable · 1 object changed — Cube scaled on Z` +
+`Ctrl+Z reverts that turn; Ctrl+Alt+Z opens Blender's undo history`) plus the
+persistent coverage sentence from ticket 12. Rationale: push-at-end makes the
+agent's step an ordinary *labelled* undo step, and Blender's native Undo History
+already renders it — but the addon cannot query the top of the undo stack (ticket
+12: zero undo RNA), so a one-click `Revert` would silently revert the user's own
+last action whenever the agent's step is not on top. Degraded mode: Global Undo
+off → persistent banner + Send disabled (auto-run paused). Rejected: custom
+revert control (unreliable), an in-panel undo stack (duplicates Blender's),
+per-tool-call steps (ticket 12: one step per turn).
+
+### 6. Stop
+One stable slot: **Stop replaces Send** while a turn is in flight. It cancels an
+in-flight *stream* (worker `{"cmd":"cancel"}`, then `proc.kill()` after grace),
+discards queued-but-unstarted tool calls, keeps partial text marked `[stopped]`.
+It **cannot** stop an in-flight `run_blender_python`: exec runs synchronously on
+the main thread, Blender processes no events while it runs, so the click is not
+even delivered. The panel therefore shows `running code — cannot be interrupted`
+instead of a dead button. A hung exec stays force-quit-only. Rejected: a second
+Stop elsewhere, a modal hotkey (same delivery problem), pretending Stop kills
+code (invites `while True:`).
+
+### Rejected layouts
+`log` is cheapest (49 stub widgets vs 78) but every kind reads as one wall of
+prefixed text. `external` (27 widgets) gives real scrolling, monospace and
+selection, but separates input from output, loses Enter-to-send and code/tool
+adjacency; kept as the *escape hatch* for full history, not the conversation.
+Rejected on paper: an in-panel `UIList` transcript (scrolls, but rows are
+single-line, so wrapped prose and code are clipped — clicking each row to read it
+is worse than the region scroll) and reverse-chronological order (fixes input
+drift, makes the conversation read backwards for no gain once pages are bounded).
+
+### Paging
+A panel cannot scroll; the region can. Adopted: whole-message pages packed from
+the newest end (`PAGE_LINES = 34`), `Older`/`Newer`, `→ N earlier` marker, newest
+page always full. Page cost is computed as if details were collapsed, so
+expanding a block never reflows the page (regression check added).
+
+### What a human must still judge
+- Box chrome vs. usable width; is ~34 chars the right inset; should short code
+expand by default.
+- Page size 34 + top-of-panel pager vs. just emitting everything and letting the
+region scroll.
+- Whether the receipt belongs above the input (chosen) or under the streaming
+reply, and whether `Ctrl+Alt+Z` in a sentence is discoverable enough.
+- Run `Show code` once — its area split was never exercised headlessly.
 
 ## Comments

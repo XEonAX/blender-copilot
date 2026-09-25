@@ -63,6 +63,25 @@ mkdir -p dist                      # the builder does NOT create this itself
 Open the 3D Viewport, press **N** for the sidebar, and pick the **Copilot** tab.
 Type into the box, press **Send**, and watch the reply stream in.
 
+### Compare the conversation layouts
+
+The panel renders one demo conversation in three candidate layouts, switchable
+live at the bottom of the panel (**Layout (prototype)**):
+
+- **Role boxes** — user turn as a labelled block, assistant turn as one bordered box.
+- **Flat log** — prefixed plain text, no borders.
+- **External transcript** — panel keeps only controls; transcript and code live in
+  the `Copilot Transcript` / `Copilot Code` Text datablocks.
+
+The decision and the rejected alternatives are on
+[`.scratch/blender-copilot/issues/08-panel-conversation-ux.md`](.scratch/blender-copilot/issues/08-panel-conversation-ux.md).
+
+```sh
+# run every layout's draw body with a stub UILayout (no GUI needed)
+/Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
+    --python tools/panel_draw_smoke.py
+```
+
 ## Verified / not verified
 
 Verified on 2026-09-25 against Blender 5.2.2:
@@ -76,8 +95,8 @@ Verified on 2026-09-25 against Blender 5.2.2:
 
 **Not verified, because it needs a human looking at a GUI:** that the panel
 draws as intended, that the textbox renders and writes back, that the streamed
-repaint is smooth rather than janky, and the undo behaviour in
-`tools/undo_probe.py`.
+repaint is smooth rather than janky, that `Show code` splits an area correctly,
+and the undo behaviour in `tools/undo_probe.py`.
 
 ## Two things that shape the design
 
