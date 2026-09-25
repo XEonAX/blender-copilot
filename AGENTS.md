@@ -63,6 +63,12 @@ assumptions wearing a human's signature is worse than an unresolved ticket.
 - Prefer running something over reading about it. Say **how** you verified.
 - Cite file paths with line numbers, or URLs, for factual claims.
 - State plainly what you could not verify.
+- **Chain verification with `&&`, never `;`.** A `;` runs the next step whether or
+  not the previous one failed, so a broken build gets committed while the
+  traceback scrolls past. That is not hypothetical: a session on this effort
+  changed three function signatures, updated two of the three call sites in the
+  checker, and committed the result because the pipeline that caught the error
+  did not stop the commit. Run the check, read its exit code, then commit.
 - **Never launch a GUI application and never take screenshots.** Hand visual
   judgement to the human and say so.
 - **Bound every probe you run.** A case whose subject *is* an infinite loop must

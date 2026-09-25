@@ -144,17 +144,22 @@ def main() -> None:
                 conversation.session.newest()
                 log: list = []
                 layout = StubLayout(log)
+                # The stub context has no `region`, so wrap_budget falls back to
+                # the fixed measure - which is the point: this proves the draw
+                # bodies RUN, not that they fit. Fitting is checked by
+                # long_labels/longest_label below and, ultimately, by an eye.
+                budget = panel.wrap_budget(context)
                 if variant == "log":
                     instance._draw_log(layout, context)
                 elif variant == "external":
                     instance._draw_external(layout, context)
                 else:
-                    instance._draw_boxes(layout, context)
+                    instance._draw_boxes(layout, context, budget)
                 instance._draw_header(layout, context)
-                instance._draw_receipt(layout)
+                instance._draw_receipt(layout, budget)
                 instance._draw_input(layout, context, settings)
                 instance._draw_actions(layout, context)
-                instance._draw_coverage(layout)
+                instance._draw_coverage(layout, budget)
                 instance._draw_variant_picker(layout, settings)
                 worst = long_labels(log)
                 longest = longest_label(log)
