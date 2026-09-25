@@ -35,8 +35,15 @@ The work is charted as a wayfinder map:
 4. **Never edit `map.md`, and never edit another session's ticket file.** The
    orchestrator updates the map in one serial pass at the end, which is what
    stops concurrent writers clobbering it.
-5. No `git` commands — the orchestrator commits at wave boundaries.
-6. Do not delegate to subagents. Do the work yourself.
+5. **No git commands that write.** `git status`, `git log` and `git diff` are
+   fine and sometimes the honest way to check your own work; `add`, `commit`,
+   `checkout`, `stash`, `reset` and friends are the orchestrator's, at wave
+   boundaries. Nothing else in the repo is off limits to a read.
+6. **If your ticket cannot be resolved without a human**, set
+   `Status: human-required`, add a `DO NOT CLAIM` banner above the heading, and
+   say in the body exactly what a human would have to do. Do not guess on the
+   human's behalf and do not file it as `resolved`.
+7. Do not delegate to subagents. Do the work yourself.
 
 ## Provisional decisions
 

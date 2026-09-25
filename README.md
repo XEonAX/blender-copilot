@@ -7,8 +7,11 @@ here; `/Users/user/Projects/blender` is a read-only reference clone.
 streaming reply. No model is called, no tool is executed, nothing is persisted.
 Its only job is to prove the panel is a viable chat surface before an agent loop
 is built on it. The route from here is charted in
-[`.scratch/blender-copilot/map.md`](.scratch/blender-copilot/map.md) — twelve
-tickets, three of them already resolved.
+[`.scratch/blender-copilot/map.md`](.scratch/blender-copilot/map.md) — eighteen
+tickets: **fourteen resolved**, two that need a human, two open. Every decision
+in there was made by an agent with nobody in the loop, so every one of them is
+`PROVISIONAL`; they are collected for signature in
+[`docs/ratification.md`](docs/ratification.md).
 
 ## Layout
 
@@ -88,10 +91,13 @@ Verified on 2026-09-25 against Blender 5.2.2:
 
 - manifest parses (`extension validate`)
 - all four classes register and unregister without error
-- 20 unit checks on the conversation and wrapping logic pass on plain CPython
+- 42 unit checks on the conversation and wrapping logic pass on plain CPython
 - the package builds, installs, and enables as `bl_ext.user_default.blender_copilot`
 - preferences bind correctly, so the textbox has an RNA string to attach to
 - the symlinked extension directory is discovered and enables
+- `tools/capability_probe.py` runs headlessly and reproduces its own numbers
+  (77 attempts: 49 denied, 2 escaped, 11 blocked, 15 allowed), so the capability
+  boundary in ticket 13 is a measurement rather than a claim
 
 **Not verified, because it needs a human looking at a GUI:** that the panel
 draws as intended, that the textbox renders and writes back, that the streamed

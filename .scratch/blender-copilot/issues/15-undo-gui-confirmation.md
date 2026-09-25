@@ -8,7 +8,7 @@
 > `tools/wayfinder-wave.sh`.
 
 Type: task
-Status: open
+Status: human-required
 Blocked by: none
 
 ## Question
