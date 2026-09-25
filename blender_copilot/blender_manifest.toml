@@ -17,9 +17,10 @@ license = [
 
 tags = ["Development", "3D View"]
 
-# Nothing contacts the network yet - the prototype replays a canned reply. The
-# permission is declared from day one so the permission path is exercised from
-# the start rather than bolted on later.
+# The addon sends prompts to an OpenAI-compatible endpoint from a worker
+# subprocess and streams the reply back. The permission is a declaration that
+# Blender's own features honour, NOT a sandbox - verified: Python sockets work
+# even under `--offline-mode` (see .scratch/blender-copilot/research/).
 [permissions]
 network = "Send prompts to an OpenAI-compatible API and stream replies back"
 

@@ -1,15 +1,20 @@
 """The panel, its operators and its preferences.
 
-Placement is settled: the 3D Viewport sidebar (`VIEW_3D` / `UI`). This revision
-carries the *How a conversation is laid out and controlled* prototype: three
-candidate layouts over one conversation model, switchable at runtime from a
-preference so a human can compare them in the GUI.
+Placement is settled: the 3D Viewport sidebar (`VIEW_3D` / `UI`). The layout is
+the `boxes` variant *How a conversation is laid out and controlled* chose and a
+human looked at; the two rejected variants stay switchable from a preference
+because they cost nothing and are the comparison surface for the next visual
+pass.
 
-  * `log`      - flat prefixed text, inline everything, cheapest chrome.
-  * `boxes`    - user turn as a labelled block, assistant turn as a bordered
-                 box with collapsed code / tool rows. The chosen layout.
-  * `external` - panel keeps controls only; transcript and code live in
-                 addon-owned Text datablocks in a Text Editor.
+Send is real now. It builds the wire messages (`prompt.py`), hands them to the
+worker subprocess (`transport.py`), and `stream.py` repaints as the reply
+arrives. Two operator behaviours carry transport policy rather than taste:
+
+  * **Stop** cancels the child and marks the turn stopped in the UI immediately,
+    then keeps draining until the child agrees or the grace expires.
+  * a worker that **cannot run at all** gets a persistent block with a reason
+    and a Retry, and Send is disabled - a turn that cannot start must not look
+    like a turn that produced nothing.
 
 The two Text editors are written on change regardless of variant, because the
 panel cannot show code unwrapped or selectable. `Open transcript` / `Show code`
@@ -20,7 +25,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, stream
+from . import conversation, prompt, stream, transport
 
 CATEGORY = "Copilot"
 NON_HOST_AREAS = {"TEXT_EDITOR", "PREFERENCES", "STATUSBAR", "TOPBAR"}
@@ -140,21 +145,48 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
 class BLENDER_COPILOT_OT_send(bpy.types.Operator):
     bl_idname = "blender_copilot.send"
     bl_label = "Send"
-    bl_description = "Send the prompt (prototype: replays a canned reply)"
+    bl_description = "Send the prompt and stream the reply back into the panel"
     bl_options = {"INTERNAL"}
 
     def execute(self, context):
+        session = conversation.session
         settings = prefs(context)
         if settings is None:
             self.report({"ERROR"}, "Blender Copilot preferences unavailable")
             return {"CANCELLED"}
+        if session.streaming:
+            self.report({"INFO"}, "A turn is already running")
+            return {"CANCELLED"}
         if not context.preferences.edit.use_global_undo:
             self.report({"ERROR"}, "Global Undo is off - auto-run is paused")
             return {"CANCELLED"}
-        if not settings.prompt_text.strip():
+
+        text = settings.prompt_text.strip()
+        if not text:
             self.report({"INFO"}, "Nothing to send")
             return {"CANCELLED"}
-        conversation.session.send(settings.prompt_text)
+
+        config = transport.config()
+        if config.problem:
+            session.set_transport_error(config.problem)
+            stream.tag_view3d_redraw()
+            self.report({"ERROR"}, "Blender Copilot is not configured - see the panel")
+            return {"CANCELLED"}
+
+        # Built BEFORE the turn is opened, because the new prompt is not yet part
+        # of the transcript - opening the turn first would send the user's own
+        # message twice.
+        messages = prompt.messages_for(session, text)
+        problem = transport.worker.send(config, messages)
+        if problem:
+            session.set_transport_error(problem)
+            stream.tag_view3d_redraw()
+            self.report({"ERROR"}, "The worker could not start - see the panel")
+            return {"CANCELLED"}
+
+        session.begin_turn(text)
+        # Only cleared on success, so a refused send leaves the text where the
+        # user can fix and resend it rather than retyping a paragraph.
         settings.prompt_text = ""
         mirror_transcript()
         stream.start()
@@ -165,15 +197,39 @@ class BLENDER_COPILOT_OT_stop(bpy.types.Operator):
     bl_idname = "blender_copilot.stop"
     bl_label = "Stop"
     bl_description = (
-        "Stop the in-flight stream. A running tool call cannot be stopped: "
-        "bpy is executing on the main thread and Blender does not pump events"
+        "Stop the in-flight stream and keep what arrived. A running tool call "
+        "cannot be stopped: bpy executes on the main thread and Blender does "
+        "not pump events while it runs"
     )
     bl_options = {"INTERNAL"}
 
     def execute(self, context):
+        # Stop in the UI now, then tell the child: waiting for the child to
+        # agree would leave the button live for up to the cancel grace. The
+        # drain keeps pumping until the child acknowledges or is killed.
         conversation.session.cancel()
-        stream.stop()
+        transport.worker.cancel()
         mirror_transcript()
+        stream.start()
+        stream.tag_view3d_redraw()
+        return {"FINISHED"}
+
+
+class BLENDER_COPILOT_OT_retry_transport(bpy.types.Operator):
+    bl_idname = "blender_copilot.retry_transport"
+    bl_label = "Retry"
+    bl_description = "Kill any half-started worker and try again on the next send"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        transport.worker.reset()
+        conversation.session.set_transport_error(None)
+        # Re-read the environment rather than assume: a missing variable is the
+        # most likely reason the worker would not run, and it is better to say
+        # so again than to let Send fail silently twice.
+        config = transport.config()
+        if config.problem:
+            conversation.session.set_transport_error(config.problem)
         stream.tag_view3d_redraw()
         return {"FINISHED"}
 
@@ -343,6 +399,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         # to the same measure, so a resized sidebar changes all of them together.
         budget = wrap_budget(context)
         self._draw_header(layout, context)
+        self._draw_transport(layout, budget)
         self._draw_input(layout, context, settings)
         self._draw_actions(layout, context, budget)
 
@@ -379,6 +436,26 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
                 icon="CHECKMARK",
             )
 
+    def _draw_transport(self, layout, budget):
+        """Ticket 11's persistent failure state: a reason, a disabled Send, and
+        a Retry - never a retry loop.
+
+        Above the input on purpose: it is the one message that changes what the
+        controls below it can do, so it must not be reachable only by scrolling
+        past an unbounded transcript.
+        """
+        problem = conversation.session.transport_error
+        if not problem:
+            return
+        box = layout.box()
+        box.alert = True
+        box.label(text="Send is unavailable", icon="ERROR")
+        for line in conversation.wrap(problem, budget):
+            box.label(text=line)
+        box.operator(
+            "blender_copilot.retry_transport", text="Retry", icon="FILE_REFRESH"
+        )
+
     def _draw_receipt(self, layout, budget):
         receipt = conversation.session.last_receipt
         if not receipt:
@@ -412,7 +489,9 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             row.operator("blender_copilot.stop", text="Stop", icon="PAUSE")
         else:
             sub = row.row(align=True)
-            sub.enabled = undo_on
+            # Disabled when auto-run is paused, and when there is no transport to
+            # send through. A Send that cannot work must not look pressable.
+            sub.enabled = undo_on and not session.transport_error
             sub.operator("blender_copilot.send", text="Send", icon="PLAY")
         row.operator("blender_copilot.clear", text="Clear", icon="TRASH")
 

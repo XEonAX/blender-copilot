@@ -1,8 +1,10 @@
 """Blender Copilot - a Copilot-style chat panel that lives inside Blender.
 
-Prototype stage. The panel renders a canned conversation and a fake streaming
-reply; no model is called, no tool is executed, nothing is persisted. Its job
-is to prove the panel is a viable surface before an agent loop is built on it.
+One real turn works end to end: a prompt typed in the panel goes to a worker
+subprocess (`transport.py` launches `_worker.py`, which is HTTP and SSE only),
+the reply streams back over a pipe, and a `bpy.app.timers` drain repaints the
+sidebar as it arrives. No tools, no persistence and no undo push yet - those
+are the next passes, and the map says which tickets own them.
 
 No `bl_info` here on purpose: as an extension, Blender synthesises `bl_info`
 from `blender_manifest.toml` and deletes any hand-written one with a warning.
@@ -12,7 +14,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, panel, stream
+from . import conversation, panel, stream, transport
 
 _classes = (
     panel.BlenderCopilotPreferences,
@@ -25,17 +27,21 @@ _classes = (
     panel.BLENDER_COPILOT_OT_page_older,
     panel.BLENDER_COPILOT_OT_page_newer,
     panel.BLENDER_COPILOT_OT_enable_global_undo,
+    panel.BLENDER_COPILOT_OT_retry_transport,
     panel.BLENDER_COPILOT_PT_panel,
 )
 
 
 def register() -> None:
-    conversation.seed_once()
     for cls in _classes:
         bpy.utils.register_class(cls)
 
 
 def unregister() -> None:
     stream.stop()
+    # The child's stdin read loop ends on EOF, so an idle orphan is impossible
+    # (ticket 11) - but closing it is still ours to do, and doing it politely
+    # first means a clean exit rather than a `kill`.
+    transport.worker.shutdown()
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

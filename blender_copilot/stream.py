@@ -1,15 +1,22 @@
-"""The repaint pump.
+"""The drain, and the repaint it drives.
 
-This is the mechanism the whole design leans on, so it is worth proving early:
-a `bpy.app.timers` callback is the only thing that may touch `bpy` from the
-"other side", and it drives the panel's repaint by tagging the region.
+This is the mechanism the whole design leans on: a `bpy.app.timers` callback is
+the only thing that may touch `bpy` from the "other side", and it is also the
+only place a worker event becomes visible state. Each tick:
 
-Two rules worth keeping when this becomes real:
+  1. `transport.worker.tick()` - non-blocking. It drains whatever the reader
+     threads queued and applies the transport's own time-based verdicts (no
+     `ready` inside the timeout, cancel grace elapsed, the child exited).
+  2. every event goes through `session.apply_event`, which reports whether
+     anything the user can see has changed.
+  3. `region.tag_redraw()`, once, and only if something changed. Tagging on
+     every tick would repaint continuously and burn CPU for nothing.
+  4. Return `None` while idle, so Blender unregisters the timer and an idle
+     panel costs nothing.
 
-  * Only tag a redraw when something actually changed. `tag_redraw()` on every
-    tick would repaint continuously and burn CPU for nothing.
-  * Return `None` to have Blender unregister the timer. The timer only exists
-    while there is something to show, so an idle panel costs nothing.
+Three rules from ticket 11 live in the shape of this file: the main thread
+never waits for the child, never joins a thread, and never blocks on a read.
+Each of those would freeze Blender's UI for the length of an HTTP request.
 
 Deliberately a module-level function, not a bound method: timers holding bound
 methods have historically needed a keep-alive workaround, and a plain function
@@ -20,9 +27,12 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation
+from . import conversation, transport
 
-TICK = 0.1
+# 50 ms. Ticket 11 measured launch-to-ready at 0.021 s and a JSON round trip at
+# 0.02 ms, so this is two orders of magnitude above the IPC it is watching -
+# which is the point: the tick must never be the bottleneck.
+TICK = 0.05
 
 
 def tag_view3d_redraw() -> int:
@@ -50,14 +60,26 @@ def tag_view3d_redraw() -> int:
 
 
 def _tick():
-    if not conversation.session.advance():
-        return None
-    tag_view3d_redraw()
-    return TICK if conversation.session.streaming else None
+    changed = False
+    for event in transport.worker.tick():
+        if conversation.session.apply_event(event):
+            changed = True
+
+    if changed:
+        tag_view3d_redraw()
+
+    # Keep pumping while either side still has work. `busy` is what covers the
+    # gap between the UI showing "stopped" and the child admitting it; without
+    # it, a cancelled-but-unacknowledged turn would never be drained.
+    if conversation.session.streaming or transport.worker.busy:
+        return TICK
+    return None
 
 
 def start() -> None:
-    if conversation.session.streaming and not bpy.app.timers.is_registered(_tick):
+    if (
+        conversation.session.streaming or transport.worker.busy
+    ) and not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=TICK, persistent=True)
 
 

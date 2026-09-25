@@ -137,6 +137,17 @@ def main() -> None:
         context = fake_context()
         settings = SimpleNamespace(layout_variant="boxes", prompt_text="")
 
+        # The live session starts EMPTY now that Send runs a real turn, so the
+        # layout fixture is seeded here instead of by `register()`. One
+        # conversation holding every kind the panel can render, which is what
+        # these draw bodies exist to exercise.
+        conversation.session.messages.clear()
+        conversation.session.messages.extend(conversation._demo())
+        conversation.session.last_receipt = {
+            "summary": "1 object changed - Cube scaled on Z",
+            "coverage": "Ctrl+Z reverts that turn; Ctrl+Alt+Z opens Blender's undo history",
+        }
+
         for variant in ("log", "boxes", "external"):
             for expanded in (False, True):
                 for message in conversation.session.messages:
@@ -156,6 +167,7 @@ def main() -> None:
                 else:
                     instance._draw_boxes(layout, context, budget)
                 instance._draw_header(layout, context)
+                instance._draw_transport(layout, budget)
                 instance._draw_receipt(layout, budget)
                 instance._draw_input(layout, context, settings)
                 instance._draw_actions(layout, context, budget)
@@ -177,18 +189,39 @@ def main() -> None:
                         f"({kind}): {text!r}"
                     )
 
+        # The transport failure block, which draws nothing when there is no
+        # failure - both halves, because a block that only ever draws is as
+        # broken as one that never does.
+        log = []
+        instance._draw_transport(StubLayout(log), panel.wrap_budget(context))
+        assert log == [], log
+        conversation.session.set_transport_error("DEEPSEEK_API_KEY not set")
+        log = []
+        instance._draw_transport(StubLayout(log), panel.wrap_budget(context))
+        assert (
+            "operator",
+            "blender_copilot.retry_transport",
+            "Retry",
+        ) in log, log
+        print("ok   the transport failure block draws, and only when it should")
+        conversation.session.set_transport_error(None)
+
         # A failed API call and a running tool must both be reachable by drawing.
         conversation.session.older()
         page, _, _, _ = conversation.session.page_view()
         kinds = [m.kind for m in page]
         print("ok   older page renders kinds:", sorted(set(kinds)))
 
-        # Stop replaces Send only while streaming.
-        conversation.session.send("check the stop slot")
+        # Stop replaces Send only while a turn is in flight.
+        conversation.session.begin_turn("check the stop slot")
         log = []
         instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
         assert ("operator", "blender_copilot.stop", "Stop") in log, log
         conversation.session.cancel()
+        log = []
+        instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
+        assert ("operator", "blender_copilot.send", "Send") in log, log
+        print("ok   Stop replaces Send only while a turn is in flight")
 
         print("\nall draw bodies ran")
     finally:

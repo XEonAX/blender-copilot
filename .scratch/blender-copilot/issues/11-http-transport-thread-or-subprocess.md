@@ -143,4 +143,66 @@ long-lived thread + repeating timer as decisive without field-testing its real c
 `multiprocessing`; (3) `proc.kill()` as the terminal Stop path; (4) visible failure over any
 silent non-streaming fallback.
 
+## Built, 2026-09-26
+
+**The transport is no longer a design. It exists, and one real turn goes through
+it end to end.** Nothing above is changed by this; this records what was built
+against it, and the four places the build departed from the letter of the
+design.
+
+The files: `blender_copilot/_worker.py` (the child: HTTP and SSE only, imports no
+`bpy` and nothing from the package), `blender_copilot/transport.py` (the parent
+side: `Popen`, two daemon reader threads, a queue, and a `tick()` the drain timer
+calls), `blender_copilot/stream.py` (the tick, now a drain), and the Send/Stop/
+Retry operators in `blender_copilot/panel.py`.
+
+Two runs, both in `.scratch/blender-copilot/research/round-trip-built.md`:
+
+| run | what it proves |
+|---|---|
+| `tools/transport_smoke.py`, headless under Blender's bundled `python3.13` | the child starts, `ready` is never awaited (`send` on the wire 0.001 s after `Popen`), 32 events stream back, a full turn completes, and a second turn on the **same child** is cancelled in **0.02 s** by the child's own `stopped` event — `proc.kill()` never fired |
+| `tools/panel_round_trip.py`, real GUI session, bounded and self-quitting | `Send → FINISHED`, a reply arrived, and the drain **repainted a real region 2 times** — the seam that cannot be exercised under `blender -b`, because timers only pump from the GUI event loop |
+
+No screenshot was taken; whether the panel *looks* right is still the human's
+call, as `docs/ratification.md` already records.
+
+### Where the build departed from the design, and why
+
+1. **Read timeout is 30 s, not the `(5, 1.0)` this ticket suggested.** That
+   suggestion was written before ticket 16 measured that thinking streams as
+   deltas: a 1-second gap is ordinary on a large prefill, and aborting there
+   would have looked like a network fault. Cancellation does not depend on the
+   timeout in the design either — `raw.shutdown()` unblocks the reader
+   immediately, and the measured cancel latency above is 0.02 s — so the timeout
+   is bounded slack, and the 2 s grace kill remains the backstop.
+2. **`DEEPSEEK_MODEL` exists, defaulting to `deepseek-flash`.** That string is
+   *measured*, not remembered: ticket 16's live run echoed `deepseek-flash` back,
+   and it is deliberately not the legacy `deepseek-v4-flash` that is accepted
+   while silently serving a retired model. Ticket 05 §4's "ships empty and Send
+   refuses" governs the **preferences field**, which this pass does not build; the
+   env var is what a scaffold reads. The model must move into that field when the
+   preferences UI is built.
+3. **The request does not use ticket 10's prompt.** Ticket 10's base prompt
+   teaches three tools; the tools are not built, and its own anti-drift rule says
+   the prompt must describe the enabled boundary and never a hoped-for one.
+   `blender_copilot/prompt.py` therefore carries the honest no-tools subset —
+   short, and it says plainly that code execution is not wired up. The live
+   summary is the trailing `system` message exactly as designed.
+4. **A transcript block is not a transport failure.** `401`/`429`/a dropped
+   stream end the *turn* with an error block, and the user resends. Only "the
+   worker cannot run at all" — no credentials, no `ready`, a child that died
+   before it was ready — sets the persistent panel error, disables Send and
+   offers the Retry. That split is this ticket's "fail visibly" rule read
+   literally, and it is what stops a rate limit from disabling the panel.
+
+### What is still not built, so nobody reads this as more than it is
+
+No tools, no store, no undo push, and no conversation history on disk: the
+transcript is in memory for the session and disappears when Blender closes. The
+GUI run does not press Stop, so the Stop *operator* path is exercised only
+headlessly, at the transport level. `blender_copilot/conversation.py` keeps
+ticket 08's dead pager (`page_view`, `_pages`, `PAGE_LINES` and the two page
+operators) untouched — that removal is its own pass, tests included, as that
+ticket says.
+
 ## Comments
