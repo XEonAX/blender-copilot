@@ -173,3 +173,35 @@ The raw runs are `research/undo-gui-results*.txt` and the detail is in the ticke
 §1's push discipline also came through its own negative control: pushing *before*
 a change reverts too far, and one push at the end covers a whole multi-operation
 turn in one undo.
+
+### Correction: the runaway budget this ticket proposed does not work
+
+*Runaway and hang protection* closed on 2026-09-26 and **measured the mechanism
+this ticket proposed**, rather than assuming it:
+
+- **`sys.monitoring` `LINE` cannot stop `while True: pass`.** A compiled
+  one-liner's jump and its target share a line, so the event fires six times in
+  1.8 s and never interrupts the loop. The ticket's suggested unit is the wrong
+  one for the canonical runaway.
+- **`SIGALRM` stops it**, along with `time.sleep` and a blocking `recv`, at
+  **1.04× overhead** — three constructs the monitor cannot stop at any price
+  (4.4× and 11.4× cost for the two it does catch). The recommendation is now
+  wall-clock SIGALRM at **15 s per call / 60 s per turn**, with LINE demoted to a
+  cheap backstop.
+- **Long native calls are only stopped after they return** — 5.34 s elapsed on a
+  1 s alarm. So "the budget bounds a turn" is false for any single long C call,
+  and the UI must not claim otherwise.
+- **The interrupt cost is clean, which is the good news**: the model's `finally`
+  runs, the runner's `finally` runs, and the turn-end `undo_push` returns
+  `FINISHED` on both the monitor and the signal path. The `finally` discipline of
+  §1 survives interruption — the one interaction this ticket never examined.
+- **The budget is disarming in one line.** `except BaseException` swallows all
+  three mechanisms; `sys.monitoring.set_events(2, 0)` and
+  `signal.setitimer(ITIMER_REAL, 0)` each switch one off. And post-turn depsgraph
+  handlers run **unmonitored, unpushed and unreceipted** — which composes with the
+  owner's rejection of §6 into the sharpest form of the consequence already
+  recorded above: auto-run code can leave work behind that no budget stops and no
+  Ctrl+Z reaches.
+
+Still unmeasured: `ed.undo()` itself after an interrupt, because the operator is
+GUI-only. The push returning `FINISHED` is the part that mattered here.

@@ -271,6 +271,13 @@ CASES: dict[str, dict] = {
         src="while True:\n    try:\n        pass\n    except BaseException:\n        pass",
         note="can the signal raise be swallowed by the model like the monitor's?",
     ),
+    "alarm_swallow_wide": dict(
+        cat="exception swallowed", kind="alarm", seconds=1.0, repeat=True,
+        timeout=8,
+        src="while True:\n    try:\n        s = 0\n        for i in range(200000):\n"
+            "            s += i\n    except BaseException:\n        pass",
+        note="repeating alarm, wide guarded body: swallowed and never terminates?",
+    ),
     # --- wave 2: the holes wave 1 opened -----------------------------------
     "while_true_pass_instr": dict(
         cat="pure-python loop", kind="instr", limit=200000, timeout=8,
@@ -326,6 +333,17 @@ CASES: dict[str, dict] = {
         src=f"{SPHERE}\nx = 1\ny = 2",
         note="alarm during one long Blender C operator",
         push=True,
+    ),
+    "alarm_deep_recursion": dict(
+        cat="wall-clock alarm", kind="alarm", seconds=1.0, timeout=8,
+        src="import sys\nsys.setrecursionlimit(4_000_000)\n"
+            "def f(n):\n    return f(n + 1)\nf(0)",
+        note="pure-Python recursion under the alarm",
+    ),
+    "alarm_generator_loop": dict(
+        cat="wall-clock alarm", kind="alarm", seconds=1.0, timeout=8,
+        src="def g():\n    while True:\n        yield 1\nfor _ in g():\n    pass",
+        note="generator loop under the alarm",
     ),
 }
 
@@ -447,7 +465,8 @@ def _run_alarm(case: dict) -> None:
              "value_after_undo": None}
     t0 = time.monotonic()
     signal.signal(signal.SIGALRM, _on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
+    signal.setitimer(signal.ITIMER_REAL, seconds,
+                     seconds if case.get("repeat") else 0)
     try:
         try:
             exec(code, ns)

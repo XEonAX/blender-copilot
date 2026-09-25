@@ -1,0 +1,605 @@
+[
+  {
+    "case": "while_true_pass",
+    "verdict": "HUNG (killed)",
+    "wall": 8.01,
+    "detail": {
+      "timeout_s": 8
+    }
+  },
+  {
+    "case": "while_true_body",
+    "verdict": "interrupted",
+    "wall": 0.72,
+    "detail": {
+      "elapsed": 0.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 2001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "deep_recursion",
+    "verdict": "interrupted",
+    "wall": 0.7,
+    "detail": {
+      "elapsed": 0.006,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 20001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "generator_loop",
+    "verdict": "interrupted",
+    "wall": 0.69,
+    "detail": {
+      "elapsed": 0.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 2001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "sleep_3s",
+    "verdict": "completed",
+    "wall": 3.74,
+    "detail": {
+      "elapsed": 3.005,
+      "excepted": null,
+      "after_exec": true,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 4,
+      "budget_over_flag": false,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "sleep_loop",
+    "verdict": "interrupted",
+    "wall": 6.82,
+    "detail": {
+      "elapsed": 6.126,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 2001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "socket_block",
+    "verdict": "HUNG (killed)",
+    "wall": 8.02,
+    "detail": {
+      "timeout_s": 8
+    }
+  },
+  {
+    "case": "regex_backtrack",
+    "verdict": "completed",
+    "wall": 2.99,
+    "detail": {
+      "elapsed": 2.249,
+      "excepted": null,
+      "after_exec": true,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 3,
+      "budget_over_flag": false,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "numpy_single_svd",
+    "verdict": "completed",
+    "wall": 6.14,
+    "detail": {
+      "elapsed": 5.459,
+      "excepted": null,
+      "after_exec": true,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 3,
+      "budget_over_flag": false,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "numpy_loop",
+    "verdict": "interrupted",
+    "wall": 0.82,
+    "detail": {
+      "elapsed": 0.061,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 2001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "bpy_ops_heavy",
+    "verdict": "interrupted",
+    "wall": 2.12,
+    "detail": {
+      "elapsed": 1.455,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 3,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "bpy_ops_loop",
+    "verdict": "HUNG (killed)",
+    "wall": 12.01,
+    "detail": {
+      "timeout_s": 12
+    }
+  },
+  {
+    "case": "swallow_inner",
+    "verdict": "HUNG (killed)",
+    "wall": 8.01,
+    "detail": {
+      "timeout_s": 8
+    }
+  },
+  {
+    "case": "swallow_outer",
+    "verdict": "swallowed-budget-flag-set",
+    "wall": 0.71,
+    "detail": {
+      "elapsed": 0.0,
+      "excepted": null,
+      "after_exec": true,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 5,
+      "budget_over_flag": true,
+      "callback_max_depth": 1,
+      "after_marker": "reached"
+    }
+  },
+  {
+    "case": "finally_cleanup",
+    "verdict": "interrupted",
+    "wall": 0.72,
+    "detail": {
+      "elapsed": 0.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 5,
+      "budget_over_flag": true,
+      "callback_max_depth": 1,
+      "model_seen": [
+        "finally-ran"
+      ]
+    }
+  },
+  {
+    "case": "naive_scope",
+    "verdict": "crashed/escaped",
+    "wall": 0.64,
+    "detail": {
+      "rc": 0,
+      "stderr_tail": "BudgetExceeded: still over budget"
+    }
+  },
+  {
+    "case": "naive_recovery",
+    "verdict": "crashed/escaped",
+    "wall": 0.71,
+    "detail": {
+      "rc": 0,
+      "stderr_tail": "BudgetExceeded: still over budget"
+    }
+  },
+  {
+    "case": "recovery_push",
+    "verdict": "interrupted",
+    "wall": 0.71,
+    "detail": {
+      "elapsed": 0.001,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": "{'FINISHED'}",
+      "undo": "raised RuntimeError: Operator bpy.ops.ed.undo.poll() failed, context is incorrect",
+      "value_at_interrupt": 5.0,
+      "value_after_undo": 5.0,
+      "finally_ran": true,
+      "budget_count": 7,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "monitor_reentrancy",
+    "verdict": "interrupted",
+    "wall": 0.68,
+    "detail": {
+      "elapsed": 0.028,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 200001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1,
+      "iters": 99999
+    }
+  },
+  {
+    "case": "swallow_wide_instr",
+    "verdict": "HUNG (killed)",
+    "wall": 8.01,
+    "detail": {
+      "timeout_s": 8
+    }
+  },
+  {
+    "case": "budget_tamper",
+    "verdict": "HUNG (killed)",
+    "wall": 8.01,
+    "detail": {
+      "timeout_s": 8
+    }
+  },
+  {
+    "case": "alarm_tamper",
+    "verdict": "HUNG (killed)",
+    "wall": 8.01,
+    "detail": {
+      "timeout_s": 8
+    }
+  },
+  {
+    "case": "alarm_swallow",
+    "verdict": "interrupted",
+    "wall": 1.69,
+    "detail": {
+      "elapsed": 1.005,
+      "seconds": 1.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "finally_ran": true,
+      "push": null,
+      "value_at_interrupt": null,
+      "value_after_undo": null
+    }
+  },
+  {
+    "case": "alarm_swallow_wide",
+    "verdict": "HUNG (killed)",
+    "wall": 8.01,
+    "detail": {
+      "timeout_s": 8
+    }
+  },
+  {
+    "case": "while_true_pass_instr",
+    "verdict": "interrupted",
+    "wall": 0.73,
+    "detail": {
+      "elapsed": 0.023,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 200001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "while_true_body_instr",
+    "verdict": "interrupted",
+    "wall": 0.69,
+    "detail": {
+      "elapsed": 0.026,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 200001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "for_iter_int",
+    "verdict": "interrupted",
+    "wall": 0.71,
+    "detail": {
+      "elapsed": 0.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 2001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "swallow_inner_instr",
+    "verdict": "interrupted",
+    "wall": 0.71,
+    "detail": {
+      "elapsed": 0.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 2001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "thread_runaway",
+    "verdict": "thread-tripped, main survived",
+    "wall": 0.65,
+    "detail": {
+      "elapsed": 0.003,
+      "excepted": null,
+      "after_exec": true,
+      "push": null,
+      "undo": null,
+      "value_at_interrupt": null,
+      "finally_ran": true,
+      "budget_count": 2001,
+      "budget_over_flag": true,
+      "callback_max_depth": 1
+    }
+  },
+  {
+    "case": "alarm_while_pass",
+    "verdict": "interrupted",
+    "wall": 1.69,
+    "detail": {
+      "elapsed": 1.005,
+      "seconds": 1.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "finally_ran": true,
+      "push": null,
+      "value_at_interrupt": null,
+      "value_after_undo": null
+    }
+  },
+  {
+    "case": "alarm_sleep",
+    "verdict": "interrupted",
+    "wall": 1.67,
+    "detail": {
+      "elapsed": 1.002,
+      "seconds": 1.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "finally_ran": true,
+      "push": null,
+      "value_at_interrupt": null,
+      "value_after_undo": null
+    }
+  },
+  {
+    "case": "alarm_socket",
+    "verdict": "interrupted",
+    "wall": 1.73,
+    "detail": {
+      "elapsed": 1.005,
+      "seconds": 1.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "finally_ran": true,
+      "push": null,
+      "value_at_interrupt": null,
+      "value_after_undo": null
+    }
+  },
+  {
+    "case": "alarm_numpy",
+    "verdict": "interrupted",
+    "wall": 6.05,
+    "detail": {
+      "elapsed": 5.342,
+      "seconds": 1.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "finally_ran": true,
+      "push": null,
+      "value_at_interrupt": null,
+      "value_after_undo": null
+    }
+  },
+  {
+    "case": "alarm_bpy_ops",
+    "verdict": "interrupted",
+    "wall": 2.15,
+    "detail": {
+      "elapsed": 1.409,
+      "seconds": 1.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "finally_ran": true,
+      "push": "{'FINISHED'}",
+      "value_at_interrupt": 0.0,
+      "value_after_undo": null
+    }
+  },
+  {
+    "case": "alarm_deep_recursion",
+    "verdict": "HUNG (killed)",
+    "wall": 8.04,
+    "detail": {
+      "timeout_s": 8
+    }
+  },
+  {
+    "case": "alarm_generator_loop",
+    "verdict": "interrupted",
+    "wall": 1.74,
+    "detail": {
+      "elapsed": 1.001,
+      "seconds": 1.0,
+      "excepted": "BudgetExceeded",
+      "after_exec": false,
+      "finally_ran": true,
+      "push": null,
+      "value_at_interrupt": null,
+      "value_after_undo": null
+    }
+  },
+  {
+    "case": "overhead",
+    "verdict": "measured",
+    "wall": 1.14,
+    "detail": {
+      "iterations": 400000,
+      "none": {
+        "seconds": 0.0233,
+        "events": 0,
+        "slowdown": 1.0
+      },
+      "line": {
+        "seconds": 0.1034,
+        "events": 800008,
+        "slowdown": 4.44,
+        "ns_per_event": 129.2
+      },
+      "instruction": {
+        "seconds": 0.2654,
+        "events": 2800040,
+        "slowdown": 11.39,
+        "ns_per_event": 94.8
+      },
+      "alarm_1ms": {
+        "seconds": 0.0242,
+        "events": 24,
+        "slowdown": 1.04,
+        "ns_per_event": 1008333.3
+      }
+    }
+  },
+  {
+    "case": "calibrate",
+    "verdict": "measured",
+    "wall": 0.92,
+    "detail": {
+      "limit": 2000000,
+      "seconds": 0.2796,
+      "count": 2000001,
+      "lines_per_sec": 7154062
+    }
+  },
+  {
+    "case": "count_line",
+    "verdict": "measured",
+    "wall": 2.66,
+    "detail": {
+      "seconds": 1.81,
+      "events": 20406600,
+      "events_per_sec": 10203300
+    }
+  },
+  {
+    "case": "count_instr",
+    "verdict": "measured",
+    "wall": 2.66,
+    "detail": {
+      "seconds": 1.81,
+      "events": 20649733,
+      "events_per_sec": 10324868
+    }
+  },
+  {
+    "case": "count_line_exec",
+    "verdict": "measured",
+    "wall": 2.69,
+    "detail": {
+      "seconds": 1.81,
+      "events": 6,
+      "events_per_sec": 4
+    }
+  },
+  {
+    "case": "count_instr_exec",
+    "verdict": "measured",
+    "wall": 2.68,
+    "detail": {
+      "seconds": 1.81,
+      "events": 25186153,
+      "events_per_sec": 12593078
+    }
+  },
+  {
+    "case": "handler_outliving",
+    "verdict": "measured",
+    "wall": 0.71,
+    "detail": {
+      "registered": true,
+      "budget_armed_after_turn": false,
+      "push": "{'FINISHED'}",
+      "trigger": "ok",
+      "handler_fired_after_turn": 1,
+      "cube_x_mutated_by_handler": 42.0,
+      "turn_lines_charged": 1
+    }
+  }
+]
