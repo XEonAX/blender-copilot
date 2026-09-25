@@ -230,4 +230,38 @@ is enforced*. That follows ticket 17's measurement, and replaces a blanket
 "cannot be interrupted" that was already half wrong — the budget is not built, but
 the sentence no longer claims more than the mechanism can deliver.
 
+**Three more things the pass forced, all on 2026-09-26.**
+
+1. **A clipping bug only eyes could catch.** The rewritten Stop note shipped
+   reading `running code - c...ed until it returns`: Blender *middle-clips* labels
+   that do not fit, and those sentences were too long for the panel. Fixed by
+   shortening every line and putting it in a box — Blender's box labels render
+   long text whole (the 67-character coverage sentence is intact) while a bare
+   label in a narrowed column is not. Worth generalising because it is the second
+   bug the automated checks were blind to: **no headless test can catch this.** The
+   stub `UILayout` counts widgets, not pixels, so text overflowing its width is
+   structurally perfect and visually broken.
+
+2. **A ruling recorded and then not implemented.** The pager ruling above was
+   written into this ticket and left unbuilt; the owner's *next* screenshot caught
+   it, still reading `Older | Newer | 6 earlier`. `_draw_boxes` now renders every
+   message. **Recording a ruling is not applying it**, and this ticket is the
+   evidence — worth remembering the next time a decision here is filed as done.
+
+3. **Debt named rather than left implicit.** `page_view`, `_pages`, `PAGE_LINES`,
+   `session.page` and the `page_older`/`page_newer` operators are now unreachable
+   from the UI but still present **and still covered by unit checks** — which is
+   worse than plain dead code, because those checks assert behaviour the panel no
+   longer has. They belong in their own pass, tests included.
+
+**Residual drift is now certain rather than hypothetical.** With the transcript
+genuinely unbounded, the receipt, the coverage sentences and the picker all sit
+below it and can be pushed arbitrarily far down. The coverage sentences are the
+ones that matter, because ticket 12's honesty contract assumes the user can see
+them. Moving them up with the controls remains a one-line change and remains the
+owner's call.
+
+**Still unreported from the four items**: the short-code expand default, and
+`Ctrl+Alt+Z` discoverability. Both minor, neither pressed.
+
 ## Comments
