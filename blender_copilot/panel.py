@@ -344,7 +344,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         budget = wrap_budget(context)
         self._draw_header(layout, context)
         self._draw_input(layout, context, settings)
-        self._draw_actions(layout, context)
+        self._draw_actions(layout, context, budget)
 
         variant = settings.layout_variant
         if variant == "log":
@@ -403,7 +403,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             placeholder="Ask Blender...",
         )
 
-    def _draw_actions(self, layout, context):
+    def _draw_actions(self, layout, context, budget):
         session = conversation.session
         row = layout.row(align=True)
         undo_on = context.preferences.edit.use_global_undo
@@ -432,9 +432,18 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             head = note.row()
             head.enabled = False
             head.label(text="running code", icon="TIME")
-            note.label(text="Click waits until the call returns.")
-            note.label(text="A blocking C call never stops.")
-            note.label(text="A Python loop can, with a call budget.")
+            # Wrapped like every other piece of prose. These lines were hard-coded
+            # single labels, and the owner's NARROW screenshot caught the 38
+            # characters of the third one overflowing a ~295 px sidebar as
+            # "A Python loop can, with a call ...". Fixed strings are not exempt
+            # from the width.
+            for line in (
+                "Click waits until the call returns.",
+                "A blocking C call never stops.",
+                "A Python loop can, with a call budget.",
+            ):
+                for chunk in conversation.wrap(line, budget):
+                    note.label(text=chunk)
 
     def _draw_coverage(self, layout, budget):
         box = layout.box()

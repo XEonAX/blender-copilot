@@ -69,6 +69,11 @@ assumptions wearing a human's signature is worse than an unresolved ticket.
   changed three function signatures, updated two of the three call sites in the
   checker, and committed the result because the pipeline that caught the error
   did not stop the commit. Run the check, read its exit code, then commit.
+- **But `&&` alone does not gate a Blender check.** Blender exits **0** even when a
+  `--python` script raises, so a chain cannot stop on it — measured, not assumed.
+  Any `--python` checker must therefore print a verdict token (`SMOKE OK` on
+  success, `SMOKE FAILED` from a `try/except BaseException`) and the caller must
+  **grep for the token**. Gate on the token, never on the status.
 - **Never launch a GUI application and never take screenshots.** Hand visual
   judgement to the human and say so.
 - **Bound every probe you run.** A case whose subject *is* an infinite loop must

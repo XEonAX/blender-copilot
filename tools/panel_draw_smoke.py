@@ -158,7 +158,7 @@ def main() -> None:
                 instance._draw_header(layout, context)
                 instance._draw_receipt(layout, budget)
                 instance._draw_input(layout, context, settings)
-                instance._draw_actions(layout, context)
+                instance._draw_actions(layout, context, budget)
                 instance._draw_coverage(layout, budget)
                 instance._draw_variant_picker(layout, settings)
                 worst = long_labels(log)
@@ -186,7 +186,7 @@ def main() -> None:
         # Stop replaces Send only while streaming.
         conversation.session.send("check the stop slot")
         log = []
-        instance._draw_actions(StubLayout(log), context)
+        instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
         assert ("operator", "blender_copilot.stop", "Stop") in log, log
         conversation.session.cancel()
 
@@ -195,4 +195,18 @@ def main() -> None:
         bc.unregister()
 
 
-main()
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException:
+        import traceback
+
+        traceback.print_exc()
+        # Blender exits 0 even when a `--python` script raises, so a verification
+        # pipeline chaining with `&&` CANNOT gate on the exit code. That is how a
+        # broken checker got committed once already: the traceback scrolled past
+        # and the next step ran anyway. Print a token that can be grepped for, and
+        # attempt the exit code as well in case a caller does honour it.
+        print("SMOKE FAILED")
+        sys.exit(1)
+    print("SMOKE OK")
