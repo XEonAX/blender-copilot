@@ -19,7 +19,9 @@ Deliverable: the decision, the argument against the option you rejected, and the
 
 ## Answer
 
-**PROVISIONAL — no human present. Recommendation: subprocess. The child is Blender's own
+**RATIFIED 2026-09-25 by the project owner — accepted as written**, including the
+acceptance of Blender's documented verdict on the long-lived thread without
+field-testing its crash rate. Recommendation: subprocess. The child is Blender's own
 bundled `python3.13`, launched as `sys.executable <pkg>/_worker.py`, speaking
 newline-delimited JSON over stdin/stdout. Reject the worker thread.**
 

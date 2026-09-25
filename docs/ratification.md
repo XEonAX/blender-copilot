@@ -1,42 +1,53 @@
-# Ratification worksheet
+# Ratification record
 
-Every decision below was made **by an agent, with no human in the loop**, because
-orchestrated runs have no human present. Each is recorded in its ticket as
-`PROVISIONAL`. Nothing here is settled. This file exists so that ratifying them
-costs minutes rather than a re-read of eight tickets.
+**Ruled on 2026-09-25 by the project owner.** This file was written as a worksheet
+and is now the record. Every decision in the effort was made by an agent with no
+human present; this is the first point at which a person ruled on any of them.
 
-**How to use it.** Ratify per numbered item — "accept 04, 05.1; reject 12.6" is
-a complete answer. A rejection does not invalidate the ticket: each ticket names
-which sections survive an overrule.
+## Outcome
 
-**What ratifying means.** The map's `Notes` and `Decisions so far` currently
-carry these as decisions. Ratifying moves them from "agent assumption awaiting a
-signature" to binding. Rejecting means the ticket is amended, not deleted.
+| | |
+|---|---|
+| **15 items accepted as written** | 04, 05.1, 05.2, 06.1–06.4, 09.1–09.5, 10.1, 10.2, 10.4, 11.1–11.4, 12.1–12.5, 14.1–14.5 |
+| **1 item rejected** | **12.6 — the approval gate.** Auto-run stays unscoped; the capability restriction is not built |
+| **1 ticket set aside** | *The capability boundary for model-authored code* — mechanism not built, measurement and factual corrections retained |
+| **1 item mooted** | 10.3 — the `{capability}` prompt line, since there is no restriction to declare |
+| **`PROVISIONAL` markers remaining** | none — every ticket banner has been replaced |
+
+The reasoning behind the rejection, and exactly what it does and does not leave in
+force, is in *What replaces undo as the recovery mechanism?* › Ratification. The
+short version: **a gate whose own probe shows it does not contain buys false
+confidence.**
+
+**Backend, chosen the same day:** DeepSeek — `https://api.deepseek.com`, OpenAI
+format, models `deepseek-flash` and `deepseek-v4-pro`, **1M-token context**.
 
 ---
 
-## The one that gates the others
+## The one that gated the others
 
 **Ticket 12, item 6 — the approval gate. Read this one first.**
 
-*What replaces undo as the recovery mechanism?* proposes **dropping "auto-run
-arbitrary code with no approval gate"** in favour of "auto-run **scene-only**
-code; explicit approval for full-power code".
+*What replaces undo as the recovery mechanism?* **proposed dropping** "auto-run
+arbitrary code with no approval gate" in favour of "auto-run **scene-only** code;
+explicit approval for full-power code". **The owner rejected the proposal.**
 
-It made that call because the original premise died: research established that
+It had made that call because the original premise died: research established that
 Python-initiated operators **never push undo** and that undo reaches only local
 `bpy.data` — so there is no recovery mechanism that can cover arbitrary code, and
-"just press Ctrl+Z" was never a real gate.
+"just press Ctrl+Z" was never a real gate. What the rejection means in practice is
+in the ticket; it is not softened.
 
-Three other artifacts depend on this one:
+Three other artifacts depended on it, and all three moved when it was rejected:
 
-| Depends on 12.6 | Effect if you reject it |
+| Depended on 12.6 | What actually happened |
 |---|---|
-| The map's **Destination** was amended to the weaker wording | reverts to unscoped `bpy` |
-| Ticket 13, *The capability boundary for model-authored code* | loses its premise entirely |
-| Ticket 10, item 3 — the `{capability}` line in the system prompt | line is deleted, not rewritten |
+| The map's **Destination** | the scene-only wording was withdrawn — the anchor now states auto-run is unscoped |
+| Ticket 13, *The capability boundary for model-authored code* | **set aside** — its mechanism is not built |
+| Ticket 10, item 3 — the `{capability}` line in the system prompt | **moot** — the prompt has no restriction to declare |
 
-**Ticket 13 has now closed, and it measured the answer instead of arguing it.**
+**Ticket 13 closed first, and it measured the answer instead of arguing it**, which
+is why the rejection reads as coherent rather than impulsive.
 `tools/capability_probe.py` makes 77 attempts against a reference implementation
 of the proposed guard: **49 denied, 2 ESCAPED, 11 blocked by absence or type, 15
 allowed**. I re-ran the probe and reproduced those numbers exactly.
@@ -50,11 +61,14 @@ and the Full access gate is therefore a **consent surface, not a containment
 boundary**.
 
 That amends ticket 12's own wording, which claimed the promise "becomes true
-rather than decorative". So the honest form of 12.6 is *enforced for the direct
-paths, explicitly not a sandbox*. If you want a real gate rather than a curated
-namespace, this is the moment to say so: an OS sandbox or a process-isolated
-executor is a different design, and one of them (process isolation) conflicts
-with the map's no-IPC decision.
+rather than decorative". **The owner rejected 12.6 on the strength of this
+finding**, so the mechanism was not built and auto-run stayed unscoped. Nothing
+about the namespace approach was judged wrong in principle — it was judged not
+worth building *for containment*, and ticket 13's §5 and §7 say why: closing the
+introspection escapes means removing `object`/`type`/`getattr`, which breaks class
+definition and ordinary code. Real containment needs a process or an OS sandbox,
+and process isolation conflicts with the map's standing no-IPC decision — a
+different effort, not a revision of this one.
 
 Ticket 13 also **corrects ticket 12's capability list against the installed
 build**: `Text.write()` is not a file capability at all, and
@@ -179,11 +193,19 @@ can close it.
   folded in above. Their asks inherit everything else: **13.8 in particular is
   downstream of 12.6**, so ratify 12.6 before 13.8 or the second one is moot.
 - Tickets 16, 17 and 18 were graduated by the second sweep and carry no
-  decisions yet. **Ticket 16** (*The first live send against a real provider*) is
-  `human-required` — it needs a credential, and until it is resolved **every
-  wire-level claim in this document is untested**: the loop, the prompt, the
-  transport and the context projection have between them never made a real HTTP
-  request.
+  yet. **Ticket 16** (*The first live send against DeepSeek*) is `human-required`
+  because the key is genuinely **not in the environment** — verified, all three
+  candidate names are unset — and until it is resolved **every wire-level claim in
+  this document is untested**: the loop, the prompt, the transport and the context
+  projection have between them never made a real request. The unblock is
+  `export DEEPSEEK_API_KEY=...` and then flipping its `Status:` to `open`.
+- **Two ratified numbers rest on the wrong provider.** *How a conversation
+  degrades as context grows* budgets 48,000 bytes against an assumed 32k-token
+  floor, while the ratified backend offers **1M tokens**; and *Where the API key
+  lives, and how the user sets it* §4 ships an empty model field, on the now
+  discharged grounds that no model string could be verified. Both decisions stand
+  as ratified; both have a now-known better answer, and both are noted in their
+  own tickets rather than silently changed.
 - Two claims were verified against the **5.3.0-alpha source clone** rather than
   the installed 5.2.2, and ticket 05 flagged this itself rather than glossing
   it. That is the one place a version conflation was risked.

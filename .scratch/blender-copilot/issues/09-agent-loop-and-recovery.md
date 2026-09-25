@@ -21,7 +21,7 @@ Read the answers to *What exactly happens when we exec model code, and what does
 
 ## Answer
 
-**PROVISIONAL — no human present.** This ticket fixes only control flow and failure
+**RATIFIED 2026-09-25 by the project owner — accepted as written.** This ticket fixes only control flow and failure
 policy; it inherits mechanics from [What exactly happens when we exec model
 code](02-code-execution-and-undo.md), [How we call the API
 off-thread](03-networking-and-threading.md), [The three tools'

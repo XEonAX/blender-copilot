@@ -56,8 +56,11 @@ wording contract.
 
 ## Answer
 
-**PROVISIONAL — no human present.** Every decision below is mine; the
-ratification list at the end is what a human must sign.
+**SET ASIDE 2026-09-25 by the project owner.** Item 8 was rejected — there is no
+capability restriction and no gate — so **the mechanism specified below is not
+built**. The measurement is retained and the factual corrections still stand.
+Read *Ratification* at the end of this file before using anything in §1: it is a
+specification for something that will not exist.
 
 Probe: [`tools/capability_probe.py`](../../../tools/capability_probe.py), run as
 `BLENDER_USER_CONFIG=/tmp/bc-t13-cfg /Applications/Blender.app/Contents/MacOS/Blender
@@ -320,4 +323,45 @@ class definition and does not close `x.__class__`).
    reads *enforced for the direct paths, explicitly not a sandbox*, with the
    Full-access gate named a consent surface.
 
-## Comments
+## Ratification
+
+**Set aside 2026-09-25 by the project owner.** Item 8 was rejected, and the rest
+falls with it: with no restriction and no gate, items 1 (the allowlist), 2 (the
+`sys.meta_path` finder), 4 (`capability_denied` in ticket 06's `error.kind`), 5
+(the gate UX), 6 (accepting the proxied-datablock breakage) and 7
+(`capability.py` plus its anti-drift test) all describe a mechanism that will not
+exist. **Do not build from §1.**
+
+### Two things survive, and both matter
+
+**1. The measurement.** The probe established that a restricted-`__builtins__`
+guard does not contain. That is *why* the owner rejected the mechanism rather
+than a separate fact from it: a gate whose own evidence shows it does not gate is
+worse than no gate, because it buys false confidence. `tools/capability_probe.py`
+stays in the tree as that evidence, and it is reproducible — re-running it gives
+the same 49 denied / 15 allowed / 11 blocked / 2 escaped split.
+
+**2. The factual corrections.** These are claims about the installed 5.2.2, true
+whether or not anything is enforced:
+
+- `Text.write()` is **not** a file capability — it edits the text buffer. Ticket
+  12's list was wrong to include it, and `bpy.ops.text.save` is the writer.
+- `bpy.ops.script.python_exec` **does not exist** in 5.2.2. `bpy.ops.script` is
+  `execute_preset | python_file_run | reload`.
+- `hasattr` on an RNA type remains an invalid probe:
+  `hasattr(bpy.types.Image, "save")` is `False` while instances have it.
+- Raw module objects leak: `statistics.sys`, `random._os`, `uuid.os`,
+  `enum.sys` and `dataclasses.inspect` are reachable from those modules'
+  `__dict__`, so an "allowed module" passed through unproxied is itself a hole.
+  This is a fact about Python, not about Blender, and it is worth keeping.
+
+### If real containment is ever wanted
+
+Nothing here argues the namespace approach was wrong in principle — it argues it
+was not worth building *for containment*. If a future decision wants containment,
+this ticket's §5 and §7 say why the namespace approach cannot deliver it: a
+two-line introspection payload escapes, and closing that means removing
+`object`/`type`/`getattr`, which breaks class definition and ordinary code.
+Containment needs a **process or an OS sandbox**, and process isolation conflicts
+with the map's standing no-IPC decision — a different effort, not a revision of
+this one.

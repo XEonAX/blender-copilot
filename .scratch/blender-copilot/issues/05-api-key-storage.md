@@ -24,7 +24,16 @@ Decide:
 
 ## Answer
 
-**PROVISIONAL — decided with no human present. Nothing here is settled until ratified.**
+**RATIFIED 2026-09-25 by the project owner — accepted as written**, including §1's
+plaintext-in-`userpref.blend` call and §4's empty model field. The record is
+[docs/ratification.md](../../../docs/ratification.md). **Note added the same day:**
+§4's stated reason for shipping no default model — that the session could not
+verify a model string exists — is now discharged. The backend is DeepSeek
+(`https://api.deepseek.com`, OpenAI format) and its live docs give the model
+names `deepseek-flash` and `deepseek-v4-pro`, with the older `deepseek-v4-flash`
+still accepted but *remapped* to a retired model. The decision stands as ratified
+(empty until filled in) and pinning `deepseek-flash` is now a one-line change
+with evidence behind it.
 
 ### Verified this session (installed 5.2.2, `--background`, no GUI launched)
 

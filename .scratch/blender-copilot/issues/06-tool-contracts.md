@@ -25,9 +25,12 @@ Depends on the execution and undo facts in *What exactly happens when we exec mo
 
 ## Answer
 
-**PROVISIONAL — no human present.** The three schemas below are decided, not
-escrowed. Rationale + rejected alternatives are inline; the last line names what
-a human must ratify.
+**RATIFIED 2026-09-25 by the project owner — accepted as written.** The three
+schemas below are binding. Rationale + rejected alternatives are inline. The
+record is [docs/ratification.md](../../../docs/ratification.md). **One amendment
+will not arrive:** `capability_denied` was to be added to this ticket's
+`error.kind` by *The capability boundary for model-authored code* §4, and that
+mechanism was rejected, so the enum gains nothing and has no producer.
 
 Depends on [What exactly happens when we exec model code, and what does undo
 cover?](02-code-execution-and-undo.md): the exec namespace is fresh per call and

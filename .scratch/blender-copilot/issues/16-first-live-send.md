@@ -1,14 +1,41 @@
-# The first live send against a real provider
+# The first live send against DeepSeek
 
-> **DO NOT CLAIM. This ticket requires a credential no session has.** It needs a
-> real `OPENAI_API_KEY` (or an OpenAI-compatible endpoint plus its key) to be
-> present in the environment. It is `human-required` for that reason and for no
-> other: an agent with the key could resolve it. If a key is set later, flip this
-> to `Status: open` rather than filing a new ticket.
+> **DO NOT CLAIM — the key is not in the environment.** Checked 2026-09-25:
+> `DEEPSEEK_API_KEY`, `DEEPSEEK_KEY` and `OPENAI_API_KEY` are all **unset**, and
+> Blender's bundled Python sees no name matching `KEY`/`DEEPSEEK`/`OPENAI`
+> either. (`~/.pi/agent/auth.json` exists, but that is *pi's* credential store, it
+> is not an environment variable a Blender subprocess inherits, and extracting a
+> secret from it in order to spend it on a probe is not something this repo
+> should do.)
+>
+> **The unblock is one line:** export the key in the shell that launches the work,
+> then set `Status: open`. Nothing else blocks this ticket — the instance that
+> resolves it needs no human present, only the variable to exist.
 
 Type: task
 Status: human-required
 Blocked by: none
+
+## Provider facts, verified 2026-09-25
+
+Read live from `api-docs.deepseek.com`, so these are not from memory:
+
+| | |
+|---|---|
+| Base URL (OpenAI format) | `https://api.deepseek.com` |
+| Chat completions | `https://api.deepseek.com/chat/completions` |
+| Models | `deepseek-flash`, `deepseek-v4-pro` |
+| Context length | **1M tokens** (max output 384K) |
+| Tool calls, JSON output | both supported |
+| Thinking mode | on by default; `thinking: {"type": "enabled"}`, `reasoning_effort` |
+
+**One trap worth carrying into the code:** the legacy name `deepseek-v4-flash` is
+still *accepted* by the API but is **remapped to a retired model** and billed at
+the Flash price. A model string copied from memory or from an old config will
+appear to work while silently running something else. This is a concrete argument
+for *Where the API key lives, and how the user sets it* §4's insistence on not
+hard-coding a model string, and equally an argument for validating whatever the
+user does type against the live model list rather than trusting it.
 
 ## Question
 
@@ -42,7 +69,12 @@ Record, per item, the observed bytes or error rather than a prediction:
 4. **The context-length rejection shape** — the exact status and `error.code` for
    `context_length_exceeded`, which is what *How a conversation degrades as
    context grows* keys its one permitted automatic re-issue on. Force it with a
-   deliberately oversized request rather than waiting for it.
+   deliberately oversized request rather than waiting for it. **Note the
+   mismatch while you are here:** that ticket budgets 48,000 bytes against an
+   *assumed* 32k-token floor, while this provider offers **1M tokens**. The
+   projection is still correct; the number is now known to be far more
+   conservative than it needs to be, and this probe is where a real figure comes
+   from.
 5. **Tool-call fragmentation in a stream** — whether a single tool call can
    arrive split across SSE chunks, which ticket 03's accumulator assumes. If it
    can be forced, force it.
@@ -55,10 +87,10 @@ of confirmed / contradicted / still unknown. Anything contradicted is filed as a
 amendment against the ticket that assumed it; do not soften a contradiction to
 fit the design.
 
-**What a human must do:** put a key in the environment, or decide the effort
-proceeds without ever having made a real request — in which case say so in the
-map, because "the vertical slice works" would then be a claim about untested
-code.
+**What a human must do:** export the key in the shell that launches the work —
+`export DEEPSEEK_API_KEY=...` — and set this ticket to `Status: open`. That is the
+whole ask. Do not paste the key into a chat message; set it in the environment
+yourself, because anything sent through a model is sent through a model.
 
 ## Answer
 

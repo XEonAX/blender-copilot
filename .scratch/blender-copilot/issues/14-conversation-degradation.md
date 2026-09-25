@@ -49,7 +49,16 @@ policy* §4 first.
 
 ## Answer
 
-**PROVISIONAL — no human present.** Depends on [Where chat history
+**RATIFIED 2026-09-25 by the project owner — accepted as written**, including the
+48,000-byte budget and the one permitted automatic re-issue. **Note added the
+same day: the budget's premise is far more conservative than the real backend.**
+§3 assumed a 32k-token floor; the ratified backend is DeepSeek, whose live docs
+give a **1M-token context**. Nothing here is wrong — bytes remain the right unit
+and the projection stays correct — but the *number* is derived from an assumed
+floor rather than a measured one, and it is now trivially raisable. The record is
+[docs/ratification.md](../../../docs/ratification.md).
+
+Depends on [Where chat history
 lives](04-chat-history-storage.md) §4 (store cap, wire-format messages), [The
 agent loop's control flow and failure policy](09-agent-loop-and-recovery.md)
 (rounds, one call per tick, no-retry rule), [The three tools'

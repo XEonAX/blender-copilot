@@ -4,3 +4,4 @@ __pycache__/
 dist/
 logs/
 .DS_Store
+.env

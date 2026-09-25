@@ -8,9 +8,11 @@ streaming reply. No model is called, no tool is executed, nothing is persisted.
 Its only job is to prove the panel is a viable chat surface before an agent loop
 is built on it. The route from here is charted in
 [`.scratch/blender-copilot/map.md`](.scratch/blender-copilot/map.md) — eighteen
-tickets: **fourteen resolved**, two that need a human, two open. Every decision
-in there was made by an agent with nobody in the loop, so every one of them is
-`PROVISIONAL`; they are collected for signature in
+tickets: **fourteen resolved**, two that need a human, two open. Every decision in
+there was made by an agent with nobody in the loop, and then **ruled on by the
+project owner on 2026-09-25** — fifteen accepted as written, one rejected. The
+rejection was the approval gate, so model-authored code auto-runs unscoped; the
+reasoning and its consequences are in
 [`docs/ratification.md`](docs/ratification.md).
 
 ## Layout

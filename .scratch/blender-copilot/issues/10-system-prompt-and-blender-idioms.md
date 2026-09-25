@@ -23,9 +23,15 @@ Deliverable: the drafted guidance, split by where it lives, with a note on what 
 
 ## Answer
 
-**PROVISIONAL — no human present.** The allocation and the drafted text below are
-my decision, not a settled one. Evidence inline; rejected alternatives and the
-ratification list at the end.
+**RATIFIED 2026-09-25 by the project owner — accepted as written**, with **one item
+now moot**: §3's `{capability}` line, because the capability restriction it would
+have described was rejected outright — see *The capability boundary for
+model-authored code*. The anti-drift rule survives and simply has nothing to
+describe: the prompt must still not assert a restriction the runtime does not
+enforce, and the runtime enforces none. The record is
+[docs/ratification.md](../../../docs/ratification.md).
+
+Evidence inline; rejected alternatives and the ratification list at the end.
 
 Depends on [The three tools' contracts](06-tool-contracts.md) (schemas) and
 [What replaces undo as the recovery mechanism?](12-recovery-mechanism.md)

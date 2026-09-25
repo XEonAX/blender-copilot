@@ -25,7 +25,11 @@ Deliverable: the recovery design, the push and snapshot rules, and the exact use
 
 ## Answer
 
-**PROVISIONAL — no human present.** Nothing here is settled until the ratifications at the end are signed.
+**RATIFIED 2026-09-25 by the project owner — with one rejection.** Items 1–5 were
+accepted as written. **Item 6 was rejected:** the approval gate is *not built* and
+auto-run stays unscoped. See *Ratification* at the end of this file for what that
+does and does not leave in force — the consequences are real and are recorded
+there rather than smoothed over.
 
 **Empirical status of the GUI confirmation this ticket was told to fold in.** Ticket *Build the cheapest installable extension that proves the panel* built `tools/undo_probe.py` but its own answer says the GUI run was “handed over rather than automated”, and I am forbidden to launch a GUI. The four-case confirmation is therefore **still outstanding**. Every undo claim below rests on ticket *What exactly happens when we exec model code, and what does undo cover?*’s live-GUI timer probes (`t_gui.py`, `t_recipe.py`) and its `-b` probes, plus two `-b` probes I ran for this ticket (isolated `BLENDER_USER_CONFIG=/tmp/bc-t12-cfg`, user config untouched) which establish:
 
@@ -98,4 +102,53 @@ Follow-ups this ticket creates (the orchestrator graduates them): amend the dest
 5. The exact UI sentences in §5.
 6. The largest one: **dropping “auto-run arbitrary code with no approval gate”** in favour of “auto-run scene-only code; explicit approval for full-power code”, given the restriction is best-effort and not a sandbox.
 
-## Comments
+## Ratification
+
+**Ratified 2026-09-25 by the project owner.** Items 1–5 above were accepted as
+written. **Item 6 was rejected, and the rejection changes the design.**
+
+### Item 6 rejected: auto-run stays unscoped
+
+The owner kept the original premise — **auto-run arbitrary Python, no approval
+gate** — rather than demote auto-run to a scene-only capability with full power
+behind a default-off gate.
+
+That is coherent with the evidence rather than contrary to it. *The capability
+boundary for model-authored code* built the proposed guard and attacked it: 77
+attempts, 2 escapes, both by introspection rather than through any named path. **A
+gate whose own probe shows it does not contain is arguably worse than no gate**,
+because it buys false confidence. So this ticket's §6 claim — that "the promise
+in §5 becomes true rather than decorative" — is moot, and the `Full access` gate is
+not built.
+
+### What the rejection leaves in force
+
+Untouched, and still binding:
+
+- §1's push discipline: **one unified push per user turn, at the end, in a
+  `finally`, only if the turn mutated.**
+- §3's receipt: the pre/post bounded `get_scene_info` diff.
+- §4's Global Undo off → auto-run **pauses**. This is not a capability gate. It is
+  the addon declining to auto-run when the user has switched off the only
+  recovery that exists, and it stays.
+
+### What is no longer true, and is now corrected in the map
+
+The map said "auto-run for scene-only Python". It now says auto-run is unqualified.
+Concretely, with no restriction installed:
+
+- The push covers **local `bpy.data` only** — never files, subprocesses, network
+  calls, preferences or Python state. Nothing else stands in front of those.
+- Auto-run code has **full filesystem access**, and the sharpest consequence is
+  *Where the API key lives, and how the user sets it* §1: the key is ratified to
+  sit in **plaintext** in `userpref.blend`. Auto-run code can read it and send it
+  anywhere. That is two ratified decisions combining, not a defect in either.
+- `bpy.app.handlers` and `bpy.app.timers` are open to model-authored code, so a
+  turn can register work that outlives the turn and the session. The end-of-turn
+  push does not reach it and cannot.
+- *The capability boundary for model-authored code*'s withhold list is **not
+  enforced, because it is not installed.** Its measurement survives as evidence;
+  its mechanism does not.
+
+This is recorded as the owner's decision, taken with the measurement in hand. It
+is not softened here, because this file is what later sessions read.

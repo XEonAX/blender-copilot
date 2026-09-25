@@ -19,7 +19,9 @@ Weigh the fact that this is a *local developer tool* against the risk that a `.b
 
 ## Answer
 
-**PROVISIONAL — decided without a human present. Nothing here is settled until ratified.**
+**RATIFIED 2026-09-25 by the project owner — accepted as written.** No longer
+provisional, including the per-`.blend`-path scoping the ticket called its most
+contestable choice. The record is [docs/ratification.md](../../../docs/ratification.md).
 
 ### Verified against the installed Blender 5.2.2 (background `-b`, no GUI launched)
 
