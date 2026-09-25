@@ -96,6 +96,28 @@ def long_labels(log: list) -> list:
     return sorted(out, reverse=True)
 
 
+def longest_label(log: list) -> int:
+    """The longest label actually drawn.
+
+    Reported unconditionally, not derived from the over-limit list: the first
+    version of this took its value from that list, so it printed 0 whenever
+    nothing exceeded the limit - a check that says nothing while looking like it
+    says something. The running maximum is the useful number, because it shows
+    text creeping toward the edge before any single string crosses it.
+    """
+    return max(
+        (
+            len(entry[1])
+            for entry in log
+            if isinstance(entry, tuple)
+            and len(entry) == 3
+            and entry[0] in ("label", "operator")
+            and entry[1]
+        ),
+        default=0,
+    )
+
+
 def fake_context():
     return SimpleNamespace(
         preferences=SimpleNamespace(edit=SimpleNamespace(use_global_undo=True)),
@@ -135,7 +157,7 @@ def main() -> None:
                 instance._draw_coverage(layout)
                 instance._draw_variant_picker(layout, settings)
                 worst = long_labels(log)
-                longest = worst[0][0] if worst else 0
+                longest = longest_label(log)
                 print(
                     f"ok   variant={variant:8s} expanded={expanded!s:5s} "
                     f"widgets={len(log)} boxes={log.count('box')} "

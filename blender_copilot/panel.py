@@ -279,6 +279,44 @@ class BLENDER_COPILOT_OT_enable_global_undo(bpy.types.Operator):
 # Panel
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Responsive wrapping
+#
+# A Panel cannot scroll anything but its region, and that region is
+# user-resizable - so a FIXED character wrap is wrong by construction. It wastes
+# half a widened panel and clips on a narrowed one, and both failure modes were
+# seen on screen before this existed.
+#
+# `PX_PER_CHAR` is measured, not guessed: `blf.dimensions(0, "n" * 64)` at the UI
+# font size (11 points, `ui_scale` 1.0) returns 7.0 px/char on Blender 5.2.2 -
+# see `tools/panel_width_probe.py`. It scales with `ui_scale`, because the whole
+# UI does. `blf` reports whole pixels, so 7.0 is exact only to the pixel, and
+# `UI_INSET_PX` is generous for that reason: it is better to wrap a character or
+# two early than to clip.
+# ---------------------------------------------------------------------------
+PX_PER_CHAR = 7.0
+UI_INSET_PX = 30.0
+MIN_WRAP_CHARS = 12
+
+
+def wrap_budget(context) -> int:
+    """Characters that fit on one line of the panel at its CURRENT width.
+
+    Falls back to `conversation.BOX_WRAP_CHARS` when there is no region, which is
+    the case under `tools/panel_draw_smoke.py`: the draw bodies run there against
+    a stub layout with no window at all.
+    """
+    width = getattr(getattr(context, "region", None), "width", 0) or 0
+    if width <= UI_INSET_PX:
+        return conversation.BOX_WRAP_CHARS
+    scale = 1.0
+    try:
+        scale = float(context.preferences.system.ui_scale) or 1.0
+    except Exception:
+        pass
+    return max(MIN_WRAP_CHARS, int((width - UI_INSET_PX) / (PX_PER_CHAR * scale)))
+
+
 class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -299,6 +337,11 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         # Human visual pass, 2026-09-26: the owner rejected the bounded pager in
         # favour of emitting everything, and separately reported having to scroll
         # the sidebar to reach Send because the input sat below the transcript.
+        #
+        # One wrap budget per draw, from the region's CURRENT width, shared by
+        # every piece of prose below: transcript, receipt and coverage all wrap
+        # to the same measure, so a resized sidebar changes all of them together.
+        budget = wrap_budget(context)
         self._draw_header(layout, context)
         self._draw_input(layout, context, settings)
         self._draw_actions(layout, context)
@@ -309,13 +352,13 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         elif variant == "external":
             self._draw_external(layout, context)
         else:
-            self._draw_boxes(layout, context)
+            self._draw_boxes(layout, context, budget)
 
         # Drawing the receipt straight after the transcript IS "under the
         # streaming reply": it belongs to the turn it describes rather than
         # standing above the input, which is what the visual pass reversed.
-        self._draw_receipt(layout)
-        self._draw_coverage(layout)
+        self._draw_receipt(layout, budget)
+        self._draw_coverage(layout, budget)
         self._draw_variant_picker(layout, settings)
 
     # -- chrome --------------------------------------------------------------
@@ -336,15 +379,21 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
                 icon="CHECKMARK",
             )
 
-    def _draw_receipt(self, layout):
+    def _draw_receipt(self, layout, budget):
         receipt = conversation.session.last_receipt
         if not receipt:
             return
         box = layout.box()
         row = box.row(align=True)
         row.label(text="Undoable", icon="CHECKMARK")
-        box.label(text=receipt["summary"])
-        box.label(text=receipt["coverage"])
+        # Wrapped, not drawn as one label: the coverage sentence is ~65 characters
+        # and at the measured 7.0 px/char that needs 455 px, so on a default-width
+        # sidebar an unwrapped label is middle-clipped - and this is the line that
+        # tells the user how to undo.
+        for line in conversation.wrap(receipt["summary"], budget):
+            box.label(text=line)
+        for line in conversation.wrap(receipt["coverage"], budget):
+            box.label(text=line)
 
     def _draw_input(self, layout, context, settings):
         layout.textbox(
@@ -387,10 +436,13 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             note.label(text="A blocking C call never stops.")
             note.label(text="A Python loop can, with a call budget.")
 
-    def _draw_coverage(self, layout):
+    def _draw_coverage(self, layout, budget):
         box = layout.box()
+        # These are the honesty contract's sentences. They must be readable at any
+        # sidebar width, so they wrap like everything else instead of clipping.
         for line in conversation.COVERAGE_LINES:
-            box.label(text=line)
+            for chunk in conversation.wrap(line, budget):
+                box.label(text=chunk)
 
     def _draw_variant_picker(self, layout, settings):
         box = layout.box()
@@ -417,7 +469,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         box.label(text=f'Code: "{conversation.CODE_TEXT}"')
 
     # -- variant: role boxes (chosen) ---------------------------------------
-    def _draw_boxes(self, layout, context):
+    def _draw_boxes(self, layout, context, budget):
         # No pager. The human visual pass of 2026-09-26 rejected bounded pages in
         # favour of emitting everything and letting the sidebar REGION scroll -
         # the panel cannot scroll itself, but the region it lives in can. So the
@@ -432,27 +484,27 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         messages = conversation.session.messages
         index_of = {id(message): i for i, message in enumerate(messages)}
         for turn in _turns(messages):
-            self._draw_turn(layout, turn, index_of)
+            self._draw_turn(layout, turn, index_of, budget)
 
-    def _draw_turn(self, layout, turn, index_of):
+    def _draw_turn(self, layout, turn, index_of, budget):
         """A user turn is a labelled block; an assistant turn is one bordered
         box holding its whole reply - prose, code and tool calls together."""
         first = turn[0]
         if first.kind == conversation.KIND_USER:
             layout.label(text="You", icon="USER")
-            for chunk in conversation.wrap(first.text, conversation.BOX_WRAP_CHARS):
+            for chunk in conversation.wrap(first.text, budget):
                 layout.label(text=chunk)
             layout.separator(factor=0.4)
             return
 
         turn_box = layout.box()
         for message in turn:
-            self._draw_part(turn_box, message, index_of.get(id(message), -1))
+            self._draw_part(turn_box, message, index_of.get(id(message), -1), budget)
 
-    def _draw_part(self, layout, message, index):
+    def _draw_part(self, layout, message, index, budget):
         if message.kind == conversation.KIND_ASSISTANT:
             if message.text:
-                for chunk in conversation.wrap(message.text, conversation.BOX_WRAP_CHARS):
+                for chunk in conversation.wrap(message.text, budget):
                     layout.label(text=chunk)
             return
 
@@ -470,7 +522,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             # legible. Every other kind already draws a short title with the full
             # text behind an expander; errors were the lone exception.
             for position, chunk in enumerate(
-                conversation.wrap(message.text, conversation.BOX_WRAP_CHARS)
+                conversation.wrap(message.text, budget)
             ):
                 box.label(text=chunk, icon="ERROR" if position == 0 else "NONE")
             if message.detail:
