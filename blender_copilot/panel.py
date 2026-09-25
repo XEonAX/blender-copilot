@@ -418,20 +418,20 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
 
     # -- variant: role boxes (chosen) ---------------------------------------
     def _draw_boxes(self, layout, context):
-        page, hidden, has_older, has_newer = conversation.session.page_view()
-        if hidden or has_newer:
-            pager = layout.row(align=True)
-            older = pager.row(align=True)
-            older.enabled = has_older
-            older.operator("blender_copilot.page_older", text="Older", icon="LOOP_BACK")
-            newer = pager.row(align=True)
-            newer.enabled = has_newer
-            newer.operator("blender_copilot.page_newer", text="Newer", icon="LOOP_FORWARDS")
-            if hidden:
-                pager.label(text=f"{hidden} earlier")
-
-        index_of = {id(message): i for i, message in enumerate(conversation.session.messages)}
-        for turn in _turns(page):
+        # No pager. The human visual pass of 2026-09-26 rejected bounded pages in
+        # favour of emitting everything and letting the sidebar REGION scroll -
+        # the panel cannot scroll itself, but the region it lives in can. So the
+        # whole transcript renders here.
+        #
+        # `session.page_view`, `_pages`, `PAGE_LINES`, `session.page` and the two
+        # page operators are now unreachable from the UI. They are deliberately
+        # NOT deleted in the same pass, because their unit checks would have to be
+        # removed with them and that is a separate, self-contained change. Named
+        # here so the next reader does not find two contradictory designs and have
+        # to work out which one is live.
+        messages = conversation.session.messages
+        index_of = {id(message): i for i, message in enumerate(messages)}
+        for turn in _turns(messages):
             self._draw_turn(layout, turn, index_of)
 
     def _draw_turn(self, layout, turn, index_of):
