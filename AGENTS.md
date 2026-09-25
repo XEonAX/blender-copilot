@@ -84,6 +84,24 @@ assumptions wearing a human's signature is worse than an unresolved ticket.
 - `blender_copilot/` is a working prototype: the manifest validates and it
   installs and enables as `bl_ext.user_default.blender_copilot`.
 
+## Credentials
+
+A `.env` at the repo root holds **`DEEPSEEK_API_KEY`** and
+**`DEEPSEEK_API_URL`**. It is listed in `.gitignore` and has never been committed
+— keep it that way, and check (`git check-ignore -v .env`) before you trust that.
+
+- Load it with `set -a; . ./.env; set +a` in the shell that launches the work, so
+  a Blender subprocess inherits the values. A `.env` is **not** loaded
+  automatically — nothing in Blender or in this repo reads it for you.
+- **Never** print, echo, log or commit the key. Not into a ticket, not into a
+  `logs/` file, not into a transcript "for debugging". Refer to it by name.
+- Read `DEEPSEEK_API_URL` rather than hard-coding a base URL, and never hard-code
+  a model string from memory — the provider's own docs show a legacy name that is
+  still accepted but silently remapped to a retired model.
+- Ticket **16** (*The first live send against DeepSeek*) is the only place a real
+  request should be made, and it is the one ticket whose whole purpose is to
+  spend a few cents.
+
 ## Layout
 
 ```

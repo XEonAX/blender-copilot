@@ -1,19 +1,21 @@
 # The first live send against DeepSeek
 
-> **DO NOT CLAIM — the key is not in the environment.** Checked 2026-09-25:
-> `DEEPSEEK_API_KEY`, `DEEPSEEK_KEY` and `OPENAI_API_KEY` are all **unset**, and
-> Blender's bundled Python sees no name matching `KEY`/`DEEPSEEK`/`OPENAI`
-> either. (`~/.pi/agent/auth.json` exists, but that is *pi's* credential store, it
-> is not an environment variable a Blender subprocess inherits, and extracting a
-> secret from it in order to spend it on a probe is not something this repo
-> should do.)
+> **Unblocked 2026-09-25 — claimable.** The credential lives in a `.env` at the repo
+> root (`DEEPSEEK_API_KEY`, `DEEPSEEK_API_URL`), which is gitignored and has never
+> been committed. It is **not** exported automatically, so load it in the same
+> shell that launches the work:
 >
-> **The unblock is one line:** export the key in the shell that launches the work,
-> then set `Status: open`. Nothing else blocks this ticket — the instance that
-> resolves it needs no human present, only the variable to exist.
+> ```
+> set -a; . ./.env; set +a
+> ```
+>
+> Verify it arrived before spending anything:
+> `[ -n "$DEEPSEEK_API_KEY" ] && echo present`. **Never** echo the value — not into
+> a ticket, not into `logs/`, not into a transcript "for debugging". Confirm
+> `git check-ignore -v .env` still holds before committing anything.
 
 Type: task
-Status: human-required
+Status: open
 Blocked by: none
 
 ## Provider facts, verified 2026-09-25
@@ -22,8 +24,8 @@ Read live from `api-docs.deepseek.com`, so these are not from memory:
 
 | | |
 |---|---|
-| Base URL (OpenAI format) | `https://api.deepseek.com` |
-| Chat completions | `https://api.deepseek.com/chat/completions` |
+| Base URL (OpenAI format) | read **`DEEPSEEK_API_URL` from the environment**, not from this table |
+| Documented default | `https://api.deepseek.com`; chat at `/chat/completions` |
 | Models | `deepseek-flash`, `deepseek-v4-pro` |
 | Context length | **1M tokens** (max output 384K) |
 | Tool calls, JSON output | both supported |
@@ -87,10 +89,11 @@ of confirmed / contradicted / still unknown. Anything contradicted is filed as a
 amendment against the ticket that assumed it; do not soften a contradiction to
 fit the design.
 
-**What a human must do:** export the key in the shell that launches the work —
-`export DEEPSEEK_API_KEY=...` — and set this ticket to `Status: open`. That is the
-whole ask. Do not paste the key into a chat message; set it in the environment
-yourself, because anything sent through a model is sent through a model.
+**Nothing blocks this ticket now** — the credential is already in `.env`. Spend
+deliberately: one or two requests, not a soak test. Flash is roughly $0.15 per
+million input tokens off-peak and $0.60 per million output, so the whole ticket
+costs cents, but **record the actual figure** alongside the findings, because
+this is the one ticket in the effort whose purpose is to spend money.
 
 ## Answer
 
