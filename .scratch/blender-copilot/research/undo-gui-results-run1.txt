@@ -1,0 +1,83 @@
+Undo probe -- raw observations from a GUI session
+Ticket: .scratch/blender-copilot/issues/15-undo-gui-confirmation.md
+Blender 5.2.2 LTS, python 3.13.13
+when: 2026-09-25T23:56:41
+global undo at end: True
+
+These are raw state transitions, not verdicts. Interpretation belongs
+on the ticket, so nothing here is scored PASS or FAIL.
+
+=== 1  operator from Python, push at END, one undo
+    action   : primitive_cube_add(); undo_push('probe: cube added, push at END') -> ok; undo
+    return   : {'FINISHED'}
+    objects  : 4 -> 3
+    added    : -
+    removed  : ['Probe1']
+    note     : Probe1 gone means a pushed step CAN revert a Python-driven operator
+
+=== 2  operator from Python, NO push
+    action   : undo_push(BASELINE); primitive_cube_add() with NO push; undo until Probe2 is gone
+    return   : 1 undo call(s): ["{'FINISHED'}"]
+    objects  : 3 -> 3
+    added    : -
+    removed  : -
+    note     : one undo means the add was absorbed into the previous step, i.e. NOT separately revertible
+
+=== 3a direct RNA write, push at END
+    action   : Probe3a.location.z 0.0 -> 3.0; undo_push('probe: RNA write, push at END') -> ok; undo
+    return   : {'FINISHED'}
+    objects  : 4 -> 4
+    added    : -
+    removed  : -
+    note     : z 0.0 -> 3.0 -> 0.0 with cube present=True  (undo_push('probe: marker, Probe3a at z=0') -> ok)
+
+=== 3b direct RNA write, NO push
+    action   : Probe3b.location.z 0.0 -> 3.0; then undo
+    return   : {'FINISHED'}
+    objects  : 5 -> 4
+    added    : -
+    removed  : ['Probe3b']
+    note     : z 0.0 -> 3.0 -> None with cube present=False  -- if it jumped past the z=0 marker, the RNA write was never a step
+
+=== 4  multi-op turn, ONE push, ONE undo
+    action   : two cube_add + an RNA move + an RNA scale, then ONE undo_push('COPILOT TURN 7') -> ok, then ONE undo
+    return   : {'FINISHED'}
+    objects  : 4 -> 4
+    added    : -
+    removed  : -
+    note     : both Probe4a and Probe4b gone in a single undo means push-at-END covers a whole turn
+
+=== 5  push BEFORE the change (negative control)
+    action   : set z=0.0, undo_push('probe: marker BEFORE the change') -> ok, set z=5.0, then undo
+    return   : {'FINISHED'}
+    objects  : 5 -> 4
+    added    : -
+    removed  : ['Probe5']
+    note     : z 0.0 -> 5.0 -> None; expect 0.0, and a vanished cube means it reverted too far
+
+=== 6  Global Undo OFF
+    action   : Global Undo off; cube added; undo_push('probe: global-undo-off marker') -> ok; z set to 7.0; undo
+    return   : {'FINISHED'}
+    objects  : 5 -> 4
+    added    : -
+    removed  : ['Probe6']
+    note     : z=None, cube present=False  -- if nothing changed, recoverability is genuinely gone and the preference is a valid detector
+
+=== 7  active edit-mode object
+    action   : crashed
+    return   : 
+    objects  : 0 -> 0
+    added    : -
+    removed  : -
+    note     : ReferenceError: StructRNA of type Object has been removed
+
+THREE THINGS NO SCRIPT CAN DO -- please check these and report them:
+
+  A. Press the REAL Ctrl+Z key (not bpy.ops.ed.undo) after the run and
+     confirm it behaves as the programmatic undo above did. The addon's
+     stop/undo path goes through the keypress, not the operator.
+  B. Open Edit > Undo History and read the step labels. Do the steps
+     pushed above appear, and does 'COPILOT TURN 7' appear as ONE step?
+  C. Count the steps in Undo History and compare with the number of
+     undo_push calls this run made. A mismatch means pushes are being
+     merged or dropped.

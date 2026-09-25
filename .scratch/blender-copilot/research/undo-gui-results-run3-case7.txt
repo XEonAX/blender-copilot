@@ -1,19 +1,19 @@
 Undo probe -- raw observations from a GUI session
 Ticket: .scratch/blender-copilot/issues/15-undo-gui-confirmation.md
 Blender 5.2.2 LTS, python 3.13.13
-when: 2026-09-26T00:14:55
+when: 2026-09-26T00:14:53
 global undo at end: True
 
 These are raw state transitions, not verdicts. Interpretation belongs
 on the ticket, so nothing here is scored PASS or FAIL.
 
-=== 6  Global Undo OFF
-    action   : Global Undo off; cube added; undo_push('probe: global-undo-off marker') -> ok; z set to 7.0; undo
-    return   : undo -> RAISED RuntimeError: Operator bpy.ops.ed.undo.poll() failed, context is incorrect
-    objects  : 4 -> 4
+=== 7  active edit-mode object
+    action   : enter EDIT, move one vertex by +1.0, undo_push('probe: edit-mode vertex move') -> ok, undo
+    return   : {'FINISHED'}
+    objects  : 4 -> 3
     added    : -
-    removed  : -
-    note     : z=7.0, cube present=True  -- if nothing changed, recoverability is genuinely gone and the preference is a valid detector
+    removed  : ['Probe7']
+    note     : mode was EDIT_MESH (now OBJECT); vertex z 1.0 -> -1.0 -> cube gone after undo  -- edit mode keeps its own undo stack, so this is best-effort
 
 THREE THINGS NO SCRIPT CAN DO -- please check these and report them:
 

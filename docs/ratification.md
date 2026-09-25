@@ -177,13 +177,15 @@ can close it.
 
 ## Two evidence gaps a human must close
 
-1. **Ticket 15 — *Confirm the four undo cases in a GUI*.** Status is
-   `human-required` and it is excluded from frontier scans by protocol, not by
-   convention. Run `tools/undo_probe.py` in the installed Blender 5.2.2 and
-   record the observed behaviour. **If case 2 behaves differently than
-   predicted, ticket 12 §1 is wrong and the whole push discipline has to be
-   rewritten** — that is the negative control, and it is the reason this ticket
-   exists rather than being an afterthought.
+1. ~~**Ticket 15 — *Confirm the four undo cases in a GUI*.**~~ **CLOSED
+   2026-09-26.** All five cases were measured. Case 2 behaved exactly as
+   predicted, so §1's push discipline stands; cases 4 and 5 corrected §4's
+   wording and *strengthened* its conclusion. The detail is in the ticket and the
+   raw runs are in `research/undo-gui-results*.txt`. Worth noting how it closed:
+   the human ran the first four cases, then the permission for non-headless runs
+   was broadened to "cases that genuinely need a screen" and the orchestrator
+   measured the last two, bounded, in fresh sessions — and the isolated re-run
+   **overturned the first reading** of case 4.
 2. **The visual pass on ticket 08.**
 
 ## Known limits of this worksheet

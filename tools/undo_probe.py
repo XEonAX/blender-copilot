@@ -331,4 +331,19 @@ def _write_report() -> None:
     print(_HUMAN)
 
 
-run_all()
+if os.environ.get("BC_QUIT"):
+    # Launched non-headlessly from a terminal with --python, so this script body
+    # runs *before* the event loop starts. Undo needs a screen, so defer to a
+    # timer and quit from inside it. Run it under the bounded driver anyway:
+    #   python3 tools/bounded_run.py 60 -- env BC_QUIT=1 \
+    #     /Applications/Blender.app/Contents/MacOS/Blender \
+    #     --factory-startup --python tools/undo_probe.py
+    def _deferred() -> None:
+        try:
+            run_all()
+        finally:
+            bpy.ops.wm.quit_blender()
+
+    bpy.app.timers.register(_deferred, first_interval=1.0)
+else:
+    run_all()

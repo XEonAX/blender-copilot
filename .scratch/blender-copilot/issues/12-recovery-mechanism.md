@@ -152,3 +152,24 @@ Concretely, with no restriction installed:
 
 This is recorded as the owner's decision, taken with the measurement in hand. It
 is not softened here, because this file is what later sessions read.
+
+### Measured the next day: both halves of §4's detector, confirmed
+
+*Confirm the four undo cases in a GUI* closed on 2026-09-26, and it tested §4's
+assumption rather than accepting it.
+
+- **Global Undo off → `bpy.ops.ed.undo()` raises**
+  `RuntimeError: Operator bpy.ops.ed.undo.poll() failed, context is incorrect`,
+  and nothing is reverted. So the preference is a valid detector — and there is a
+  **second mechanical one**: attempting the push fails, so the addon need not read
+  the preference to know undo is dead.
+- **Edit mode → `undo_push(...)` returns ok and records nothing usable**, and the
+  following undo **removes the object entirely**. §4 called this "the item most
+  likely to be wrong"; it was right, and the consequence is stronger than
+  "pauses". **Pushing while in edit mode must be refused, not attempted**, because
+  the Ctrl+Z it produces deletes the object the user was editing.
+
+The raw runs are `research/undo-gui-results*.txt` and the detail is in the ticket.
+§1's push discipline also came through its own negative control: pushing *before*
+a change reverts too far, and one push at the end covers a whole multi-operation
+turn in one undo.
