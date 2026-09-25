@@ -66,16 +66,33 @@ assumptions wearing a human's signature is worse than an unresolved ticket.
 - **Never launch a GUI application and never take screenshots.** Hand visual
   judgement to the human and say so.
 - **Bound every probe you run.** A case whose subject *is* an infinite loop must
-  never be run unguarded. Two instances on this effort wedged themselves this
-  way — one for 15 minutes at 100% CPU, on the very ticket whose job is to
-  document that hazard — and both had to be killed by hand from outside. Keep
-  the runaway in a child process you can kill, and put a hard deadline on it.
-  macOS has no `timeout(1)`; use `perl -e 'alarm 30; exec @ARGV' -- <cmd>`, or a
-  driver that spawns and kills. A spinning headless Blender burns a full core
-  and nothing but a human or the orchestrator will ever stop it.
+  never be run unguarded. One instance on this effort wedged itself four times
+  this way — once for 15 minutes at 100% CPU — on the very ticket whose job is to
+  document that hazard, and every runaway had to be killed by hand from outside.
+  Use `tools/bounded_run.py`, which is verified: `python3 tools/bounded_run.py 30
+  -- <cmd>`. It kills the whole **process group**, so a runaway Blender's children
+  die with it, and it always prints one `BOUNDED |` line saying whether the
+  command finished or was killed — which, for a hang case, *is* the result.
+  Do not reach for these; they are traps. macOS has no `timeout(1)`, and
+  `perl -e 'alarm 30; exec @ARGV' -- <cmd>` was **measured failing here**: the
+  alarm did not survive `exec`, the child outlived its deadline, and the caller
+  blocked anyway.
 - **Never run a hang case in the foreground.** `while True: pass` under
-  `blender -b` will not return, so the tool call that launched it never returns
-  either, and your session dies with it.
+  `blender -b` does not return, so the tool call that launched it never returns
+  either and your session dies with it. That is not a metaphor; it is what
+  happened four times.
+- **Non-headless runs are permitted for the narrow class of work that genuinely
+  needs a screen** — the project owner broadened this from a single ticket on
+  2026-09-25. "Needs a screen" means the case cannot be measured headlessly at
+  all: undo requires one, and `bpy.app.timers` and modal operators pump only from
+  the GUI event loop. It does **not** mean "the GUI would be convenient", and it
+  does not license browsing the interface. If you use it: launch in the
+  **background**, never the foreground; wrap it in `tools/bounded_run.py`; write
+  results to a file rather than trusting the terminal; and have the script
+  **quit Blender itself**, so the deadline is a backstop and not the mechanism.
+  **Still never take a screenshot.** Seeing is the entire reason the GUI rule
+  exists, and it stays the human's job: a run may *use* a screen, never *read*
+  one.
 
 ## House facts — established, do not re-derive
 
@@ -88,6 +105,14 @@ assumptions wearing a human's signature is worse than an unresolved ticket.
 - Operators called from Python **never push undo**. Undo reaches only local
   `bpy.data`, and only after an explicit push — which belongs at the *end* of
   the unit being reverted.
+- **Undo in a GUI session, measured 2026-09-26** (raw runs:
+  `.scratch/blender-copilot/research/undo-gui-results*.txt`): pushing at the end
+  reverts exactly the unit and one push covers a whole multi-operation turn;
+  pushing *before* a change reverts **too far**; an unpushed change is not merely
+  unprotected, Ctrl+Z reaches past it; with Global Undo off `bpy.ops.ed.undo()`
+  **raises a poll failure**; and a push taken **in edit mode** records nothing
+  usable and the undo after it **deletes the object** — so never push in edit
+  mode. `undo_push(message=…)` labels appear verbatim in Undo History.
 - `bpy.app.online_access` (and `--offline-mode`) do **not** block Python
   sockets. The network permission is a declaration, not a sandbox.
 - Probing RNA: `hasattr` on an RNA type is an invalid test. Use
