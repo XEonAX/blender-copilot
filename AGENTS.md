@@ -65,6 +65,17 @@ assumptions wearing a human's signature is worse than an unresolved ticket.
 - State plainly what you could not verify.
 - **Never launch a GUI application and never take screenshots.** Hand visual
   judgement to the human and say so.
+- **Bound every probe you run.** A case whose subject *is* an infinite loop must
+  never be run unguarded. Two instances on this effort wedged themselves this
+  way — one for 15 minutes at 100% CPU, on the very ticket whose job is to
+  document that hazard — and both had to be killed by hand from outside. Keep
+  the runaway in a child process you can kill, and put a hard deadline on it.
+  macOS has no `timeout(1)`; use `perl -e 'alarm 30; exec @ARGV' -- <cmd>`, or a
+  driver that spawns and kills. A spinning headless Blender burns a full core
+  and nothing but a human or the orchestrator will ever stop it.
+- **Never run a hang case in the foreground.** `while True: pass` under
+  `blender -b` will not return, so the tool call that launched it never returns
+  either, and your session dies with it.
 
 ## House facts — established, do not re-derive
 
