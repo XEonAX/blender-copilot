@@ -292,7 +292,17 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             layout.label(text="Preferences unavailable", icon="ERROR")
             return
 
+        # Panel order carries more weight here than usual. A Panel cannot scroll
+        # (only the region can) and the transcript is now unbounded, so the
+        # controls sit ABOVE it and never drift off the fold, and everything the
+        # transcript displaces lives below it.
+        # Human visual pass, 2026-09-26: the owner rejected the bounded pager in
+        # favour of emitting everything, and separately reported having to scroll
+        # the sidebar to reach Send because the input sat below the transcript.
         self._draw_header(layout, context)
+        self._draw_input(layout, context, settings)
+        self._draw_actions(layout, context)
+
         variant = settings.layout_variant
         if variant == "log":
             self._draw_log(layout, context)
@@ -300,9 +310,11 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             self._draw_external(layout, context)
         else:
             self._draw_boxes(layout, context)
+
+        # Drawing the receipt straight after the transcript IS "under the
+        # streaming reply": it belongs to the turn it describes rather than
+        # standing above the input, which is what the visual pass reversed.
         self._draw_receipt(layout)
-        self._draw_input(layout, context, settings)
-        self._draw_actions(layout, context)
         self._draw_coverage(layout)
         self._draw_variant_picker(layout, settings)
 
@@ -356,10 +368,21 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         row.operator("blender_copilot.clear", text="Clear", icon="TRASH")
 
         if session.running_tool is not None:
-            # Honest: the click cannot be processed while exec owns the thread.
-            note = layout.row()
+            # Name both cases rather than claiming a blanket "cannot be
+            # interrupted". The click is genuinely not delivered while exec owns
+            # the main thread, but what happens after that differs by kind: a
+            # blocking C call is never stoppable, while a pure-Python loop
+            # becomes stoppable once a call budget is enforced (measured in
+            # ticket 17: SIGALRM stops `while True: pass`, `time.sleep` and a
+            # blocking recv at 1.04x overhead, and cannot stop a long native
+            # call until it returns). A half-true honesty claim is worse than a
+            # blunt one, so the panel says which is which.
+            note = layout.column()
             note.enabled = False
-            note.label(text="running code - cannot be interrupted", icon="TIME")
+            row = note.row()
+            row.label(text="running code - click not processed until it returns", icon="TIME")
+            note.label(text="a blocking C call can never be stopped; a pure-Python")
+            note.label(text="loop can be, once a per-call budget is enforced")
 
     def _draw_coverage(self, layout):
         box = layout.box()

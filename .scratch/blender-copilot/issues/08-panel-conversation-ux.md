@@ -202,4 +202,32 @@ sentence is **half wrong**: true for a blocking C call, false for a Python loop.
 §6's honesty contract needs to say which — it is the same class of error the
 design has been careful to avoid everywhere else.
 
+**Both rulings implemented in `blender_copilot/panel.py`, same day.** The panel
+order is now header → **input → actions** → transcript → receipt → coverage →
+variant picker, so the controls sit *above* the unbounded transcript and cannot
+drift off the fold. Regression-checked after the change: `panel.py` compiles, all
+three variants' draw bodies still run, the 42 conversation checks pass, and the
+manifest still validates. `boxes` now costs **80 stub widgets** against 78 before
+— the +2 is the Stop note below, which carries three labels instead of one.
+
+**The receipt needed no move of its own.** Drawing it immediately after the
+transcript *is* "under the streaming reply"; it only ever looked like it sat
+"above the input" because the input happened to come after it. Moving the input
+resolved that reversal by itself.
+
+**Residual drift, recorded rather than glossed.** Everything *after* the
+transcript — the receipt, the coverage sentences, the prototype picker — now sits
+below an unbounded transcript and can be pushed out of reach. For the picker that
+is harmless. For the receipt and the coverage sentences it matters, because
+ticket 12's honesty contract assumes the user can see them. The fix, if wanted, is
+to move the coverage block up with the controls; it was offered and not taken, so
+it stays the owner's call rather than being decided here.
+
+**The interruption claim was corrected, not reworded.** The panel now says
+`running code — click not processed until it returns`, and adds that a blocking C
+call can never be stopped while a pure-Python loop can be, *once a per-call budget
+is enforced*. That follows ticket 17's measurement, and replaces a blanket
+"cannot be interrupted" that was already half wrong — the budget is not built, but
+the sentence no longer claims more than the mechanism can deliver.
+
 ## Comments
