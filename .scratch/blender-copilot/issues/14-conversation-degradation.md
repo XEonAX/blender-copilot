@@ -300,13 +300,21 @@ timestamp (§5). No later reader ever has to infer a gap from silence.
 
 ### Unverified
 
-- No API key in this session, so **nothing wire-level is exercised**: that
-  OpenAI-compatible servers accept a **trailing `system` message** (I8), and the
-  exact status/`error.code` shape of a context-length rejection. **Fallback if the
-  trailing message is refused:** fold the summary into index 0 (ticket 09's form)
-  and accept the cache loss — I3/I8 are the only invariants that change.
+- ~~No API key in this session, so **nothing wire-level is exercised**: that
+  OpenAI-compatible servers accept a **trailing `system` message** (I8)~~ —
+  **CONFIRMED 2026-09-26** by *The first live send against DeepSeek*: a trailing
+  `system` message is **accepted (HTTP 200)**. So the live summary stays the
+  trailing message and the stable base prompt keeps index 0 and its cache prefix;
+  **the fallback below is not needed**, and I3/I8 stand as written. The provider
+  also reports `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`, so the
+  caching effect is observable instead of assumed.
+- **Still open:** the exact status/`error.code` shape of a context-length
+  rejection. Forcing it against a **1M-token** limit means uploading megabytes of
+  padding, so it was deferred — which means §3's one permitted automatic re-issue
+  is keyed on an error shape nobody has seen. If the shape differs, match on the
+  message substring as well as the code.
 - The 3-bytes/token divisor is a planning constant, not measured against any real
-tokeniser (none is installable from the bundle).
+  tokeniser (none is installable from the bundle).
 
 ### What a human must ratify
 

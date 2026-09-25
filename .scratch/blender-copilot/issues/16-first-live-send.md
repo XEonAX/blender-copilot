@@ -15,7 +15,7 @@
 > `git check-ignore -v .env` still holds before committing anything.
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: none
 
 ## Provider facts, verified 2026-09-25
@@ -97,4 +97,83 @@ this is the one ticket in the effort whose purpose is to spend money.
 
 ## Answer
 
-<!-- recorded on resolution; not written at chart time -->
+**Measured 2026-09-26. Seven requests, 772 prompt + 139 completion tokens, 11.6 s
+wall clock, well under a cent.** Full transcript with response bodies:
+`research/first-live-send.md`; scaffold: `tools/live_send_probe.py`, run under
+Blender's own bundled `python3.13` with its bundled `requests` 2.32.3 and
+`certifi`, bounded by `tools/bounded_run.py 180`. The key was read from the
+environment and never printed.
+
+**Four assumptions became facts, and two of them were load-bearing.**
+
+| # | what was assumed | what happened |
+|---|---|---|
+| 1 | the HTTP client works at all | **HTTP 200**, non-streaming completion in 1.0 s |
+| 2 | streaming reassembles | **41 SSE `data:` chunks, 9 with content, first at 0.04 s** — line-oriented, exactly what ticket 03's `iter_lines()` design needs |
+| 3 | a tool call round-trips | **issued, then accepted with its matching `tool` result**; `finish_reason\`length\`` at `max_tokens=64` |
+| 4 | *ticket 09*: every `tool_call` needs a matching `tool` result | **confirmed the hard way — HTTP 400** |
+| 5 | *ticket 14*: a trailing `system` message is accepted (invariant I8) | **HTTP 200** — accepted |
+| 6 | the legacy model name is a trap | **accepted, and the response echoes `deepseek-flash`** |
+
+### 4. The history-integrity rule is enforced, not a nicety
+
+```json
+{"error": {"message": "An assistant message with 'tool_calls' must be followed by tool
+messages responding to each 'tool_call_id'. (insufficient tool messages following
+ tool_calls message)", "type": "invalid_request_error", "code": "invalid_request_error"}}
+```
+
+Ticket 09 flagged this as an assumption it could not exercise and designed the
+flusher defensively. **It is a real wire requirement**, so the synthetic
+`cancelled` tool results for unexecuted calls are load-bearing: without them a
+Stop mid-turn produces a history the provider refuses. Ticket 09's `Unverified`
+note is now closed.
+
+### 5. The trailing `system` message works, so the cache prefix survives
+
+Accepted, so *How a conversation degrades as context grows* keeps the live summary
+as the **trailing** message, and the fallback it documented — fold the summary
+into index 0 and accept the cache loss — is **not needed**. That also settles the
+argument between ticket 09 §4's `messages[0]` form and ticket 10's placement, in
+ticket 14's favour. Supportively, the provider reports cache accounting
+(`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`) so the effect is
+observable rather than assumed.
+
+### 6. The model-name trap is real, and it lies quietly
+
+The legacy name `deepseek-v4-flash` was **accepted with HTTP 200** and answered,
+and every response in the run — including that one — echoed `"model":
+"deepseek-flash"`. So the retired name does not error; it silently serves
+something else, and the only tell is a field the caller has to think to read.
+This is now measured rather than quoted, and it is the concrete case for ticket
+05 §4's empty model field.
+
+### Two findings nobody asked for
+
+- **`tool_calls[].function.arguments` arrives as a JSON *string***
+  (`"{\"scope\": \"all\"}"`), not an object. Ticket 06's parsing must expect
+  that; a naive `arguments.get(...)` fails.
+- **Thinking is on by default and bills as completion tokens** — one probe spent
+  **25 of its 64 completion tokens** on `reasoning_tokens`, which is why
+  `finish_reason` came back `length`. Ticket 09's caps and ticket 06's 8,000-char
+  result cap both need to budget for reasoning the code never sees.
+
+### Not done, and why
+
+**Forcing a real `context_length_exceeded` was skipped.** The provider's limit is
+**1M tokens**, so provoking it honestly means uploading megabytes of padding for
+a single error shape. Deferred rather than quietly dropped: ticket 14 keys its one
+permitted automatic re-issue on that error's `status`/`error.code`, and that key
+is therefore still unverified. Its stated fallback — a single re-issue at
+`budget // 6` — remains a guess about the error's shape.
+
+Also unexercised: the **subprocess transport** itself. This went straight to
+`requests`, which is what ticket 11's child would carry, but the newline-delimited
+JSON framing, the launch-to-ready time and the kill path are ticket 11's and are
+still designs.
+
+### Spend
+
+7 requests, 772 prompt tokens, 139 completion tokens. At Flash off-peak rates
+that is under a cent — and ticket 09's caps now have a real baseline instead of an
+invented one.

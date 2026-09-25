@@ -119,6 +119,16 @@ assumptions wearing a human's signature is worse than an unresolved ticket.
   `bpy.types.X.bl_rna.functions`.
 - `blender_copilot/` is a working prototype: the manifest validates and it
   installs and enables as `bl_ext.user_default.blender_copilot`.
+- **DeepSeek's OpenAI-compatible surface, measured 2026-09-26** (raw transcript:
+  `.scratch/blender-copilot/research/first-live-send.md`, scaffold
+  `tools/live_send_probe.py`): a `tool_call` with **no matching `tool` result is
+  rejected, HTTP 400**; a **trailing `system` message is accepted**, so the live
+  summary can be last and the base prompt keeps index 0 and its cache prefix;
+  `tool_calls[].function.arguments` arrives as a **JSON string, not an object**;
+  thinking is **on by default and billed as completion tokens** (25 of 64 in one
+  probe); and the legacy model name `deepseek-v4-flash` is accepted while
+  **silently serving `deepseek-flash`**. The base URL comes from
+  `DEEPSEEK_API_URL`; never hard-code it.
 
 ## Credentials
 

@@ -35,6 +35,14 @@ still accepted but *remapped* to a retired model. The decision stands as ratifie
 (empty until filled in) and pinning `deepseek-flash` is now a one-line change
 with evidence behind it.
 
+**Measured 2026-09-26** by *The first live send against DeepSeek*: the legacy name
+`deepseek-v4-flash` is **accepted with HTTP 200** and answered, and every response
+echoed `"model": "deepseek-flash"`. The retired name does not error — it silently
+serves something else, and the only tell is a field the caller must think to read.
+That is the argument for this section's empty default, now measured rather than
+quoted, and it also says what to add: whatever the user types should be validated
+against the provider's live model list at Send time.
+
 ### Verified this session (installed 5.2.2, `--background`, no GUI launched)
 
 - No OS-keychain binding exists in Blender's Python: `import keyring`, `secretstorage`,

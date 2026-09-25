@@ -191,9 +191,16 @@ transport internals (ticket 11).
 
 ### Unverified
 
-- The provider requirement that every assistant `tool_call` have a matching `tool` result is
-  a wire contract I cannot exercise: no `OPENAI_API_KEY` is set in this session. The flusher
-  is designed defensively, but its necessity is an assumption until the first live send.
+- ~~The provider requirement that every assistant `tool_call` have a matching `tool`
+  result is a wire contract I cannot exercise~~ — **CONFIRMED 2026-09-26** by
+  *The first live send against DeepSeek*: an assistant message carrying
+  `tool_calls` with no matching `tool` message is **rejected with HTTP 400**
+  (`invalid_request_error`, "must be followed by tool messages responding to each
+  `tool_call_id`"). The flusher's synthetic `cancelled` results are therefore
+  **load-bearing**, not tidy: without them a Stop mid-turn produces a history the
+  provider refuses. Also measured: thinking is on by default and billed as
+  completion tokens (25 of 64 in one probe), so the round caps need headroom the
+  code never sees.
 - Timers never fire under `blender -b`, so “one tool call per tick” is a design consequence
   of tickets 03/08, not a measured behaviour of this ticket.
 
