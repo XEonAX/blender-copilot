@@ -70,6 +70,32 @@ class StubLayout:
         self._log.append(("template_list", args[0] if args else "", ""))
 
 
+# A label that does not fit is MIDDLE-CLIPPED by Blender, not wrapped. Three
+# clipping bugs reached a human's screen before any check existed, so this counts
+# characters. Two data points from the owner's screenshots set the limit:
+#   * 104 chars in a box  -> CLIPPED ("Request failed: ...othing changed.")
+#   *  65 chars in a box  -> renders whole (the Ctrl+Alt+Z receipt line)
+# So 70 catches gross overflow without reporting things that are known to fit.
+#
+# STATED LIMITATION, because a check that overstates itself is worse than none:
+# this CANNOT catch the first two bugs, which were ~55-character labels in a BARE
+# COLUMN, where the usable width is much smaller than in a box. Fitting depends on
+# the sidebar's pixel width and the user's font, neither of which the stub knows.
+# Treat a line here as a real bug and its absence as no evidence at all.
+LABEL_SOFT_LIMIT = 70
+
+
+def long_labels(log: list) -> list:
+    """(length, kind, text) for every drawn label past the soft limit."""
+    out = []
+    for entry in log:
+        if isinstance(entry, tuple) and len(entry) == 3:
+            kind, text = entry[0], entry[1]
+            if kind in ("label", "operator") and text and len(text) > LABEL_SOFT_LIMIT:
+                out.append((len(text), kind, text))
+    return sorted(out, reverse=True)
+
+
 def fake_context():
     return SimpleNamespace(
         preferences=SimpleNamespace(edit=SimpleNamespace(use_global_undo=True)),
@@ -108,10 +134,21 @@ def main() -> None:
                 instance._draw_actions(layout, context)
                 instance._draw_coverage(layout)
                 instance._draw_variant_picker(layout, settings)
+                worst = long_labels(log)
+                longest = worst[0][0] if worst else 0
                 print(
                     f"ok   variant={variant:8s} expanded={expanded!s:5s} "
-                    f"widgets={len(log)} boxes={log.count('box')}"
+                    f"widgets={len(log)} boxes={log.count('box')} "
+                    f"longest_label={longest}"
                 )
+                # Advisory and deliberately blunt: only gross overflow is caught,
+                # and the bare-column case above slips past it entirely. Absence
+                # of a line here is NOT evidence that the text fits.
+                for length, kind, text in worst[:4]:
+                    print(
+                        f"     !! {length} chars will likely be clipped "
+                        f"({kind}): {text!r}"
+                    )
 
         # A failed API call and a running tool must both be reachable by drawing.
         conversation.session.older()

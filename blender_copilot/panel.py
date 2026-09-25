@@ -463,7 +463,16 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             self._draw_tool(box, message, index)
         elif message.kind == conversation.KIND_ERROR:
             box.alert = True
-            box.label(text=message.text, icon="ERROR")
+            # WRAP, never one label. Blender middle-clips a label that does not
+            # fit instead of wrapping it, so a 104-character error shipped
+            # reading "Request failed: ...othing changed." - not a summary of the
+            # error but a mangling of it, in the state that most needs to be
+            # legible. Every other kind already draws a short title with the full
+            # text behind an expander; errors were the lone exception.
+            for position, chunk in enumerate(
+                conversation.wrap(message.text, conversation.BOX_WRAP_CHARS)
+            ):
+                box.label(text=chunk, icon="ERROR" if position == 0 else "NONE")
             if message.detail:
                 self._draw_detail(box, message, index)
 
