@@ -91,6 +91,12 @@ off → persistent banner + Send disabled (auto-run paused). Rejected: custom
 revert control (unreliable), an in-panel undo stack (duplicates Blender's),
 per-tool-call steps (ticket 12: one step per turn).
 
+> **SUPERSEDED 2026-09-26 by the human visual pass: the receipt moves under the
+> streaming reply.** The turn's own step, attributed to the turn rather than
+> standing above the input. Consequence to absorb: the receipt now **scrolls away
+> with its reply**, so undo discoverability depends on finding the turn — and that
+> sharpens with the paging change, since the transcript is no longer bounded.
+
 ### 6. Stop
 One stable slot: **Stop replaces Send** while a turn is in flight. It cancels an
 in-flight *stream* (worker `{"cmd":"cancel"}`, then `proc.kill()` after grace),
@@ -118,6 +124,14 @@ the newest end (`PAGE_LINES = 34`), `Older`/`Newer`, `→ N earlier` marker, new
 page always full. Page cost is computed as if details were collapsed, so
 expanding a block never reflows the page (regression check added).
 
+> **SUPERSEDED 2026-09-26 by the human visual pass: emit everything and let the
+> region scroll.** The owner saw the pager running and rejected it. This also
+> reverses the §"Rejected layouts" reasoning that bounded pages were what made the
+> boxes layout viable, and it collides with the input-drift objection the ticket
+> already raised under "reverse-chronological order" — which the owner then
+> independently reported as *"I had to scroll the sidebar to reach Send"*. The two
+> rulings need the order change proposed in the visual-pass section.
+
 ### What a human must still judge
 - Box chrome vs. usable width; is ~34 chars the right inset; should short code
 expand by default.
@@ -126,5 +140,66 @@ region scroll.
 - Whether the receipt belongs above the input (chosen) or under the streaming
 reply, and whether `Ctrl+Alt+Z` in a sentence is discoverable enough.
 - Run `Show code` once — its area split was never exercised headlessly.
+
+## Human visual pass, 2026-09-26
+
+The panel was finally **looked at**, running on the installed 5.2.2, by the
+project owner. This is the first visual claim in this effort checked by eye —
+every panel claim up to now was structural (draw bodies executed against a stub
+`UILayout`) or unverified.
+
+Setup was verified *before* the look, so the looking was not spent on a broken
+panel: manifest valid; every variant's draw body runs headlessly
+(`tools/panel_draw_smoke.py`, three variants × expanded/collapsed, no exceptions);
+the extension enables (`ENABLE: OK`, panel class registered, prefs resolve,
+default variant `boxes`); symlinked dev loop pointing at this repo.
+
+**Decided: the layout is `boxes` ("Role boxes").** Chosen by the project owner
+after seeing it render. That settles §1's choice against the two alternatives
+which were built and left switchable at runtime — `log` (flat, no borders) and
+`external` (panel keeps only controls; transcript and code move to `Text`
+datablocks).
+
+A measured input to that decision, from the smoke test's counters: `boxes` costs
+**78 widgets and 13 layout boxes** against `log`'s **49 and 4** (98 widgets once
+a block is expanded); `external` is cheapest at 27. So the chosen layout is
+meaningfully the most expensive of the three and was chosen anyway — recorded
+that way because it is a real trade of density for legibility, not a free win.
+
+**All five items answered, and two of them reverse a decision made above.**
+
+| item | verdict |
+|---|---|
+| box chrome vs. usable width; the ~34-char inset | **right as it is** — keep it |
+| short code expanding by default | not separately reported; current behaviour stands |
+| paging vs. emitting everything | **emit everything, let the region scroll** — reverses the pager |
+| receipt placement | **under the streaming reply** — reverses "above the input" |
+| `Ctrl+Alt+Z` discoverability | not separately reported |
+| `Show code` | **pressed, and it worked** — the one item with zero prior coverage, now closed |
+| reaching the input | **had to scroll the sidebar to reach Send** |
+
+**Two things the screenshots confirmed working**, which no headless test could
+have reached: errors render as first-class red blocks (`⚠ Link red material` with
+a red-bordered output strip), a running call reads as `◑ … running…`, and
+ticket 12's coverage sentences render under the actions (`Ctrl+Z undoes one agent
+turn.` / `Files, network and preferences cannot be undone.`).
+
+**A tension to resolve.** "Emit everything" and "I had to scroll to reach Send"
+pull against each other: the current order is header → transcript → receipt →
+**input** → actions → coverage → variant picker, so an unbounded transcript pushes
+the input *further* below the fold — exactly the problem just reported. The
+synthesis that satisfies both rulings is to **move the input and its actions above
+the transcript**, leaving the controls pinned at the top of the sidebar with the
+conversation flowing and scrolling beneath them. Unusual for chat; correct for a
+panel that cannot scroll itself. **Not implemented** — it changes the panel's
+order, which is a design decision and not a tweak.
+
+**A third finding, this one from ticket 17 rather than from eyes.** The screenshot
+shows `running code — cannot be interrupted`. Ticket 17 has since measured that
+`SIGALRM` *can* stop a pure-Python loop, `time.sleep` and a blocking `recv` (at
+1.04× overhead), and *cannot* stop a long native call until it returns. So that
+sentence is **half wrong**: true for a blocking C call, false for a Python loop.
+§6's honesty contract needs to say which — it is the same class of error the
+design has been careful to avoid everywhere else.
 
 ## Comments
