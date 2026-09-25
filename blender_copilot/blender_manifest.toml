@@ -1,0 +1,31 @@
+schema_version = "1.0.0"
+
+id = "blender_copilot"
+version = "0.0.1"
+name = "Blender Copilot"
+tagline = "A Copilot-style chat panel that lives inside Blender"
+maintainer = "XEonAX <sv.xeon@gmail.com>"
+type = "add-on"
+
+# Target is the installed Blender, not the 5.3-alpha source clone.
+blender_version_min = "5.2.0"
+
+# Placeholder while this is a private dev tool; revisit before any distribution.
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+tags = ["Development", "3D View"]
+
+# Nothing contacts the network yet - the prototype replays a canned reply. The
+# permission is declared from day one so the permission path is exercised from
+# the start rather than bolted on later.
+[permissions]
+network = "Send prompts to an OpenAI-compatible API and stream replies back"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/*.zip",
+]
