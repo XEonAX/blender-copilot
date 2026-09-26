@@ -25,7 +25,9 @@ Protocol, newline-delimited JSON over stdin/stdout.
       {"ev":"reasoning","id":N,"chars":N}      thinking: counted, never shown
       {"ev":"done","id":N,"finish_reason":...}  the reply ended; also carries
                                                  {"tool_calls":[...]} when the
-                                                 model asked for tools
+                                                 model asked for tools, and
+                                                 {"usage":{...}} when the
+                                                 provider reported token counts
       {"ev":"stopped","id":N}
       {"ev":"error","id":N,"kind":...,"status":N,"message":...,"detail":...}
       {"ev":"protocol_error","message":...}
@@ -124,6 +126,11 @@ class Session:
             "messages": self.messages,
             "stream": True,
             "max_tokens": self.max_tokens,
+            # The provider's own token counts, on the final chunk. Measured numbers
+            # beat the panel's estimate, and the panel has a context viewer that would
+            # otherwise have to present `bytes / 3` as if it were a count. OpenAI's
+            # streaming API only sends `usage` when asked, which is what this is.
+            "stream_options": {"include_usage": True},
         }
         if self.tools:
             payload["tools"] = self.tools
@@ -150,7 +157,7 @@ class Session:
             if response.status_code != 200:
                 emit(self._http_error(response))
                 return
-            finish_reason, tool_calls = self._consume(response)
+            finish_reason, tool_calls, usage = self._consume(response)
             if self.cancelled.is_set():
                 emit({"ev": "stopped", "id": self.id})
                 return
@@ -160,6 +167,7 @@ class Session:
                     "id": self.id,
                     "finish_reason": finish_reason,
                     "tool_calls": tool_calls,
+                    "usage": usage,
                 }
             )
         except ServerError as exc:
@@ -178,8 +186,8 @@ class Session:
             with self._lock:
                 self._response = None
 
-    def _consume(self, response) -> tuple[str | None, list[dict]]:
-        """Read the SSE stream. Returns the `finish_reason` and the tool calls.
+    def _consume(self, response) -> tuple[str | None, list[dict], dict | None]:
+        """Read the SSE stream. Returns `finish_reason`, tool calls and `usage`.
 
         The accumulation rules are ticket 03 §2, with the shapes ticket 16
         measured: `content` concatenates, `[DONE]` ends. Tool calls arrive as
@@ -188,9 +196,15 @@ class Session:
         `function.arguments` fragments must be **concatenated**. What comes out is
         therefore a JSON *string*, which is what the provider sends and what the
         parent has to expect.
+
+        `usage` rides the last chunk (the one with an empty `choices` list), so it is
+        taken from the stream as it arrives rather than assumed - and left `None` if
+        the provider never sent it, which the panel reports as "not reported"
+        instead of inventing a number.
         """
         finish_reason = None
         slots: dict[int, dict] = {}
+        usage: dict | None = None
         for line in response.iter_lines(decode_unicode=True):
             if self.cancelled.is_set():
                 break
@@ -209,6 +223,8 @@ class Session:
             if error:
                 message = error.get("message") if isinstance(error, dict) else str(error)
                 raise ServerError(message or "the server reported an error mid-stream")
+            if isinstance(event.get("usage"), dict):
+                usage = event["usage"]
             choice = (event.get("choices") or [{}])[0] or {}
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
@@ -225,7 +241,7 @@ class Session:
                 emit({"ev": "reasoning", "id": self.id, "chars": len(reasoning)})
             for fragment in delta.get("tool_calls") or []:
                 self._accumulate(slots, fragment)
-        return finish_reason, [slots[index] for index in sorted(slots)]
+        return finish_reason, [slots[index] for index in sorted(slots)], usage
 
     @staticmethod
     def _accumulate(slots: dict, fragment: dict) -> None:

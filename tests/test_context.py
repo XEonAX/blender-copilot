@@ -571,4 +571,264 @@ check(
 )
 check(f"and none of them over its budget: {over_budget} exceptions", over_budget == 0)
 
+# ------------------------------------------------- the context viewer's arithmetic
+#
+# The panel's context viewer shows these numbers, so the numbers are decided here -
+# in the module that imports no `bpy`, which is the only place a test can argue with
+# them. Three things are worth pinning: that the categories are a *partition* (they
+# must sum to the total the header divides by, or the percentages lie), that each
+# kind of byte lands in the category it claims to describe, and that `usage_summary`
+# reports the provider's numbers without inventing any it did not send.
+
+_schemas = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_blender_python",
+            "description": "Run Python inside Blender.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+_conversation = [
+    {"role": "user", "content": "make me a football of red and yellow"},
+    {"role": "assistant", "content": "Building it.", "tool_calls": [{"id": "c1"}]},
+    {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true, "stdout": ""}'},
+]
+_base = "You are Blender Copilot." * 40
+_summary = "Scene: 1 cube."
+
+
+def _wire(value) -> int:
+    """The expected size, computed here rather than by the module under test."""
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    )
+
+
+_view = context.usage(_conversation, base_prompt=_base, schemas=_schemas, summary=_summary)
+
+check(
+    "the viewer's categories are exactly the ones it reports sizes for",
+    tuple(_view["sizes"]) == context.USAGE_CATEGORIES,
+    list(_view["sizes"]),
+)
+check(
+    "and every size is a non-negative integer",
+    all(isinstance(size, int) and size >= 0 for size in _view["sizes"].values()),
+    _view["sizes"],
+)
+check(
+    "the header's total is the sum of the rows it draws",
+    _view["total"] == sum(_view["sizes"].values()),
+    (_view["total"], sum(_view["sizes"].values())),
+)
+check(
+    "a `tool` message is a tool result, not prose",
+    _view["sizes"]["Tool results"] == _wire(_conversation[2])
+    and _view["sizes"]["Messages"]
+    == _wire(_conversation[0]) + _wire(_conversation[1]),
+    _view["sizes"],
+)
+check(
+    "the base prompt, the schemas and the live summary each land in their own row",
+    _view["sizes"]["System instructions"] == _wire({"role": "system", "content": _base})
+    and _view["sizes"]["Tool definitions"] == _wire({"tools": _schemas})
+    and _view["sizes"]["Scene summary"] == _wire({"role": "system", "content": _summary}),
+    _view["sizes"],
+)
+check(
+    "a bigger history means a bigger Messages row and nothing else moves",
+    context.usage(
+        _conversation + [{"role": "user", "content": "x" * 500}],
+        base_prompt=_base,
+        schemas=_schemas,
+        summary=_summary,
+    )["sizes"]
+    == {
+        **_view["sizes"],
+        "Messages": _view["sizes"]["Messages"] + _wire({"role": "user", "content": "x" * 500}),
+    },
+)
+check(
+    "no tools declared costs nothing beyond the empty array the wire would carry",
+    context.usage(_conversation) ["sizes"]["Tool definitions"] == _wire({"tools": []}),
+    context.usage(_conversation)["sizes"]["Tool definitions"],
+)
+check(
+    "the token figure is the byte figure divided by the stated ratio",
+    _view["tokens"] == _view["total"] // context.BYTES_PER_TOKEN,
+    (_view["tokens"], _view["total"]),
+)
+check(
+    "the window is the one the budget is derived from",
+    _view["window"] == context.WINDOW_TOKENS * context.BYTES_PER_TOKEN
+    and _view["window_tokens"] == context.WINDOW_TOKENS,
+    (_view["window"], _view["window_tokens"]),
+)
+check(
+    "the reserved row is the output reserve the budget already subtracts",
+    _view["reserved"] == context.OUTPUT_RESERVE_TOKENS * context.BYTES_PER_TOKEN
+    and _view["reserved_tokens"] == context.OUTPUT_RESERVE_TOKENS,
+    (_view["reserved"], _view["reserved_tokens"]),
+)
+check(
+    "the fraction is the total against the window, and is never above 1",
+    abs(_view["fraction"] - _view["total"] / _view["window"]) < 1e-12
+    and context.usage([{"role": "user", "content": "x" * 10}], window_bytes=10)["fraction"] == 1.0,
+    _view["fraction"],
+)
+check(
+    "an empty request still costs its envelopes, and a zero window does not divide",
+    context.usage([])["sizes"]
+    == {
+        "System instructions": _wire({"role": "system", "content": ""}),
+        "Tool definitions": _wire({"tools": []}),
+        "Messages": 0,
+        "Tool results": 0,
+        "Scene summary": _wire({"role": "system", "content": ""}),
+    }
+    and context.usage([{"role": "user", "content": "hi"}], window_bytes=0)["fraction"] == 0.0,
+    context.usage([]),
+)
+check(
+    "asking for no window means no window, not the derived one",
+    context.usage([{"role": "user", "content": "x"}], window_bytes=100)["window"] == 100,
+    context.usage([{"role": "user", "content": "x"}], window_bytes=100),
+)
+check(
+    "nothing is claimed as measured until the provider says so",
+    _view["measured"] is None,
+    _view["measured"],
+)
+
+# `usage_summary`: the provider's own counts, read defensively. Each of these is a
+# shape a provider could plausibly send, including the ones that must produce silence.
+check(
+    "the provider's counts are reported with its cache figure when it sends one",
+    context.measured_line(
+        {"prompt_tokens": 12345, "completion_tokens": 678, "prompt_cache_hit_tokens": 12000}
+    )
+    == "Measured by the provider: 12,345 in (12,000 cached), 678 out tokens.",
+    context.measured_line(
+        {"prompt_tokens": 12345, "completion_tokens": 678, "prompt_cache_hit_tokens": 12000}
+    ),
+)
+check(
+    "a provider that reports no cache field gets no cache claim",
+    context.measured_line({"prompt_tokens": 10, "completion_tokens": 2})
+    == "Measured by the provider: 10 in, 2 out tokens.",
+    context.measured_line({"prompt_tokens": 10, "completion_tokens": 2}),
+)
+check(
+    "no usage block, an empty one, or garbage: silence rather than a guess",
+    context.measured_line(None) == ""
+    and context.measured_line({}) == ""
+    and context.measured_line({"prompt_tokens": "many"}) == ""
+    and context.measured_line("nope") == "",
+)
+check(
+    "a partial block reports the half it has",
+    context.measured_line({"prompt_tokens": 7})
+    == "Measured by the provider: 7 in tokens.",
+    context.measured_line({"prompt_tokens": 7}),
+)
+# The calibration: with the request's byte size known, the line reports the *measured*
+# bytes-per-token, which is the only way a reader can tell whether the panel's own
+# estimate is close. 2026-09-26's live run made this worth printing: the provider
+# counted 8,062 tokens where the estimate predicted far fewer.
+_calibrated = context.measured_line(
+    {"prompt_tokens": 2000, "completion_tokens": 10}, 8000
+)
+check(
+    "with the request size known, the line reports the measured bytes per token",
+    "4.0 bytes per token" in _calibrated and "estimates 3" in _calibrated,
+    _calibrated,
+)
+check(
+    "and without it, no ratio is claimed",
+    "bytes per token" not in context.measured_line({"prompt_tokens": 2000})
+    and "bytes per token" not in context.measured_line(
+        {"prompt_tokens": 2000}, 0
+    ),
+)
+check(
+    "the request size is the messages plus the tool definitions",
+    context.request_bytes([{"role": "user", "content": "hi"}], _schemas)
+    == _wire({"role": "user", "content": "hi"}) + _wire({"tools": _schemas}),
+    context.request_bytes([{"role": "user", "content": "hi"}], _schemas),
+)
+check(
+    "and it agrees with the viewer's own total for the same request",
+    # The two paths measure the same thing from opposite ends: `context.usage` is
+    # handed the projection plus the prompt pieces the viewer knows about, while
+    # `request_bytes` sums the messages the transport is actually about to send. The
+    # live probe calibrates against the second, the panel draws the first, so if they
+    # ever disagreed the viewer would be explaining a request nobody made.
+    context.request_bytes(
+        [
+            {"role": "system", "content": _base},
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": _summary},
+        ],
+        _schemas,
+    )
+    == context.usage(
+        [{"role": "user", "content": "hi"}],
+        base_prompt=_base,
+        schemas=_schemas,
+        summary=_summary,
+        window_bytes=1,
+    )["total"],
+    (
+        context.request_bytes([{"role": "user", "content": "hi"}], _schemas),
+        context.usage([{"role": "user", "content": "hi"}], schemas=_schemas)["total"],
+    ),
+)
+
+# The split line: the shares must sum to exactly 100, or a reader who adds them up
+# finds a bug. The awkward totals are the point of the fixtures - a request of a few
+# hundred bytes across five categories is where naive rounding drifts.
+_split = context.share_line(_view["sizes"])
+check(
+    "the split line names every category and sums to exactly 100%",
+    sum(context.shares(_view["sizes"]).values()) == 100
+    and all(
+        context.SHORT_LABELS[name] in _split for name in context.USAGE_CATEGORIES
+    ),
+    _split,
+)
+check(
+    "the split line is short enough to wrap inside a sidebar",
+    len(_split) < 120,
+    (len(_split), _split),
+)
+check(
+    "and it orders the shares by size, biggest first",
+    (
+        lambda shares: [shares[name] for name in context.USAGE_CATEGORIES]
+        == sorted((shares[name] for name in context.USAGE_CATEGORIES), reverse=True)
+    )(context.shares(_view["sizes"])),
+    context.shares(_view["sizes"]),
+)
+_rng = random.Random(20260927)
+_bad_shares = 0
+for _ in range(500):
+    _sizes = {
+        name: _rng.choice([0, 1, 2, 7, 40, 300, 1_500, 90_000])
+        for name in context.USAGE_CATEGORIES
+    }
+    if sum(context.shares(_sizes).values()) not in (0, 100):
+        _bad_shares += 1
+check(
+    "500 random size mixes: every share set sums to 100, or to 0 for an empty request",
+    _bad_shares == 0,
+    _bad_shares,
+)
+check(
+    "an all-zero request is all zeroes rather than a division by nothing",
+    set(context.shares({name: 0 for name in context.USAGE_CATEGORIES}).values()) == {0}
+    and "0%" in context.share_line({name: 0 for name in context.USAGE_CATEGORIES}),
+)
+
 print(f"\nall checks passed ({CHECKS})")

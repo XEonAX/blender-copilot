@@ -214,6 +214,191 @@ def message_bytes(message: dict) -> int:
     )
 
 
+def _bytes_of(value) -> int:
+    """The same measure for something that is not a message (the schemas, say)."""
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    )
+
+
+# The panel's context viewer, and the categories it can honestly separate. Chosen by
+# *what the bytes are* rather than who wrote them, because that is what a reader can
+# act on: the base prompt and the schemas are fixed costs, prose is cheap to keep,
+# tool results are the first thing the projection gives up, and the scene summary is
+# this add-on's own standing context.
+USAGE_CATEGORIES = (
+    "System instructions",
+    "Tool definitions",
+    "Messages",
+    "Tool results",
+    "Scene summary",
+)
+
+
+def usage(
+    projected: list[dict],
+    base_prompt: str = "",
+    schemas=None,
+    summary: str = "",
+    window_bytes: int | None = None,
+) -> dict:
+    """Where one request's bytes go, for the panel's context viewer.
+
+    `projected` is the history **as the provider will receive it** - the output of
+    `plan` - so this describes the request rather than the store. That distinction is
+    the whole reason the viewer can be trusted to explain behaviour: a record whose
+    older turns the projection drops shows the smaller number here, which is the
+    number the model actually pays for.
+
+    Bytes, not tokens: bytes are what the budget and the eviction order are measured
+    in (ticket 14 §1), so a viewer in tokens would be showing a conversion of the
+    real unit. `tokens` is offered alongside as the same estimate the budget's
+    reserves use (`BYTES_PER_TOKEN`), and `measured` is left `None` for the caller to
+    fill from the provider's own count when it has one - an estimate labelled as an
+    estimate is honest; an estimate passed off as a count is not.
+    """
+    instructions = _bytes_of({"role": "system", "content": base_prompt})
+    definitions = _bytes_of({"tools": list(schemas or [])})
+    prose = sum(
+        message_bytes(message) for message in projected if message.get("role") != "tool"
+    )
+    results = sum(
+        message_bytes(message) for message in projected if message.get("role") == "tool"
+    )
+    scene = _bytes_of({"role": "system", "content": summary})
+    sizes = {
+        "System instructions": instructions,
+        "Tool definitions": definitions,
+        "Messages": prose,
+        "Tool results": results,
+        "Scene summary": scene,
+    }
+    total = sum(sizes.values())
+    # `is not None`, not `or`: a caller asking about a zero window means a zero window
+    # (and must get a 0% fraction), while only a caller saying nothing gets the derived
+    # one. The two were the same expression once, and the percentage it produced was
+    # 0.000024% of a window nobody asked about.
+    window = int(window_bytes) if window_bytes is not None else WINDOW_TOKENS * BYTES_PER_TOKEN
+    reserved = OUTPUT_RESERVE_TOKENS * BYTES_PER_TOKEN
+    return {
+        "sizes": sizes,
+        "total": total,
+        "tokens": total // BYTES_PER_TOKEN,
+        "window": window,
+        "window_tokens": window // BYTES_PER_TOKEN,
+        "reserved": reserved,
+        "reserved_tokens": OUTPUT_RESERVE_TOKENS,
+        # Of the window, so the bar and the percentage mean "how full is the model's
+        # context", which is the question the viewer exists to answer.
+        "fraction": min(1.0, total / window) if window else 0.0,
+        "measured": None,
+    }
+
+
+# Short names for the split line. The long ones do not fit: five category names and
+# five percentages in one wrapped sentence is already three lines of a panel whose
+# measure is ~38 characters, and the names here are the same category names with the
+# words nobody needs removed.
+SHORT_LABELS = {
+    "System instructions": "system",
+    "Tool definitions": "tools",
+    "Messages": "messages",
+    "Tool results": "tool results",
+    "Scene summary": "summary",
+}
+
+
+def shares(sizes: dict) -> dict:
+    """Integer percentages that sum to exactly 100, by largest remainder.
+
+    Percentages that add to 99 or 101 are the usual rounding artefact, and this
+    viewer's entire job is to not print numbers that disagree with each other - a
+    reader who adds up the split and gets 97% has found a bug, not a rounding rule.
+    Floor everything, then hand the leftover points to the entries with the largest
+    fractional parts. With no bytes at all every share is 0, which is the truth.
+    """
+    total = sum(sizes.values())
+    if not total:
+        return {name: 0 for name in sizes}
+    exact = {name: size * 100 / total for name, size in sizes.items()}
+    shares_out = {name: int(value) for name, value in exact.items()}
+    leftover = 100 - sum(shares_out.values())
+    order = sorted(exact, key=lambda name: (-(exact[name] - shares_out[name]), name))
+    for name in order[:leftover]:
+        shares_out[name] += 1
+    return shares_out
+
+
+def share_line(sizes: dict) -> str:
+    """The category split as one line: `system 35% · tools 53% · messages 5% ...`.
+
+    One wrapped sentence rather than VS Code's five labelled rows, because the shape
+    of the container is different: their popover has a fixed height and can afford a
+    row per category, while this panel cannot scroll itself and every row it spends
+    here is a row of something else pushed below the fold. MEASURED with
+    `tools/context_view_probe.py`: the row-per-category version pushed the record and
+    layout blocks off the visible sidebar, and the split line does not.
+
+    Both figures a reader needs are still here - the shares (which category is
+    dominating) and, on the request line above it, the absolute size.
+    """
+    return " \u00b7 ".join(
+        f"{SHORT_LABELS.get(name, name)} {percent}%"
+        for name, percent in shares(sizes).items()
+    )
+
+
+def request_bytes(messages: list[dict], schemas=None) -> int:
+    """The full on-the-wire cost of one request: the messages and the tool definitions."""
+    return sum(message_bytes(message) for message in messages) + _bytes_of(
+        {"tools": list(schemas or [])}
+    )
+
+
+def measured_line(usage: dict | None, sent_bytes: int | None = None) -> str:
+    """The provider's own token count as one line, or '' when there is not one.
+
+    Read defensively, because this block is the provider's and not ours: a renamed or
+    missing field must not break a draw, and a provider that reports nothing gets
+    silence rather than a made-up figure.
+
+    `prompt_cache_hit_tokens` is DeepSeek's spelling (ticket 16 measured it) and is
+    worth showing: it is the one number that says whether the base prompt's cache
+    prefix is still being hit, which is what makes a long fixed prompt affordable.
+
+    When the byte size of the request it describes is known, the line also reports the
+    **measured** bytes-per-token, because that is the one number that says whether this
+    panel's `BYTES_PER_TOKEN` estimate is honest. MEASURED, 2026-09-26: a real first
+    request of the acceptance turn came back as 8,062 prompt tokens, which is far more
+    than the estimate predicted for those bytes - so the estimate is published next to
+    the real figure rather than left to look like a measurement. (The *budget* stays in
+    bytes: it is compared against a window also expressed in bytes, so it is
+    self-consistent whatever the true ratio is.)
+    """
+    if not isinstance(usage, dict):
+        return ""
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    parts: list[str] = []
+    if isinstance(prompt, int):
+        cached = usage.get("prompt_cache_hit_tokens")
+        text = f"{prompt:,} in"
+        if isinstance(cached, int):
+            text += f" ({cached:,} cached)"
+        parts.append(text)
+    if isinstance(completion, int):
+        parts.append(f"{completion:,} out")
+    if not parts:
+        return ""
+    line = "Measured by the provider: " + ", ".join(parts) + " tokens."
+    if isinstance(prompt, int) and prompt > 0 and sent_bytes:
+        line += (
+            f" {sent_bytes / prompt:.1f} bytes per token, where this panel estimates "
+            f"{BYTES_PER_TOKEN}."
+        )
+    return line
+
+
 def _envelope(content):
     """A tool result's envelope when it parses, else None."""
     if isinstance(content, dict):

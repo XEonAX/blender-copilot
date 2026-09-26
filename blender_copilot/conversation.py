@@ -515,6 +515,15 @@ class Conversation:
         # only moves the status between "waiting" and "thinking".
         self.reasoning_chars = 0
         self._reasoning_notch = 0
+        # The provider's usage block from the last response, or None when it has
+        # not reported one. The context viewer shows it as *measured*, next to its
+        # own byte estimate, and never presents the estimate as a count.
+        self.usage: dict | None = None
+        # The byte size of the request that usage describes, stamped by
+        # `stream._send_round` as it goes out. Kept beside the count so the viewer can
+        # report the *measured* bytes-per-token instead of leaving its own ratio
+        # unexamined - the two only mean something together.
+        self.request_bytes: int | None = None
         # When the current turn opened, for the working indicator's clock, or None
         # while no turn is in flight. Monotonic, and never written to the store: it
         # is a fact about this session's patience, not about the conversation.
@@ -932,6 +941,16 @@ class Conversation:
             return context.DEFAULT_HISTORY_BUDGET_BYTES
         return value or context.DEFAULT_HISTORY_BUDGET_BYTES
 
+    def history_bytes(self) -> int:
+        """Bytes of the stored history, by the projection's own measure.
+
+        Read by the context viewer and by the Compact action, which keeps about half
+        of what the model currently sees. Not cached: `trimmed` memoises the
+        *projection* because it runs on every repaint, while this is a single sum over
+        a list that is capped at 200 messages.
+        """
+        return sum(context.message_bytes(message) for message in self.history)
+
     @property
     def trimmed(self) -> bool:
         """Whether the model is being shown less than this record holds.
@@ -1008,6 +1027,13 @@ class Conversation:
                 return True
             return False
         if kind == "done":
+            # The provider's own token accounting, when it sent any (the worker asks
+            # for it with `stream_options`). Kept as the *last* response's numbers
+            # rather than accumulated: the viewer's question is "what does a request
+            # cost me now", and a running total would answer a different one.
+            measured = event.get("usage")
+            if isinstance(measured, dict):
+                self.usage = measured
             return self.finish_reply(
                 event.get("finish_reason"), event.get("tool_calls") or []
             )

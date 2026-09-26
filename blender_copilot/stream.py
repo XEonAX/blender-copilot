@@ -65,6 +65,11 @@ TICK = 0.05
 ANIMATION_SECONDS = 0.1
 _last_animation = 0.0
 
+# See `set_budget_override`: a Compact press is a decision about this conversation, so
+# it lives for the session rather than in the user's preferences. `None` means "use the
+# preference, or the derived budget" - which is the state the add-on ships in.
+_budget_override: int | None = None
+
 
 def _prefs():
     """The add-on's preferences, or `None`.
@@ -97,22 +102,23 @@ def _send_round(messages: list[dict]) -> str | None:
     config = transport.config(_prefs())
     if config.problem:
         return config.problem
+    # Stamp what this request actually costs, before it goes: the provider's own token
+    # count arrives later (its `usage` block) and the two are only useful together -
+    # the pair is what turns the panel's bytes-per-token estimate into something a
+    # reader can check against a measurement.
+    conversation.session.request_bytes = context.request_bytes(messages, toolbox.SCHEMAS)
     return transport.worker.send(config, messages, toolbox.SCHEMAS)
 
 
 def history_budget_bytes() -> int:
-    """The projection's budget: the addon's preference, or the derived default.
+    """The projection's budget: a Compact override, else the preference, else derived.
 
-    Ticket 14 §1's `context_history_kib` (8-512 KiB) when the user set one - a
-    lever for a smaller model than the shipped backend - and otherwise the budget
-    derived from the provider's own documented window (`context.derive_budget_bytes`),
-    which is the floor the design was written against finally replaced by the real
-    figure. 0 means "derive", and is what ships.
-
-    Read on every request rather than cached, so lowering the preference shows up
-    on the next round. A missing or unreadable preference is not an error: it
-    means the derived default, because a turn must not fail over a budget.
+    Read on every request rather than cached, so lowering the preference - or pressing
+    Compact - shows up on the next round. A missing or unreadable preference is not an
+    error: it means the derived default, because a turn must not fail over a budget.
     """
+    if _budget_override is not None:
+        return int(_budget_override)
     kib = 0
     try:
         addon = bpy.context.preferences.addons.get(__package__)
@@ -122,6 +128,23 @@ def history_budget_bytes() -> int:
     if kib > 0:
         return context.budget_from_kib(kib)
     return context.DEFAULT_HISTORY_BUDGET_BYTES
+
+
+def set_budget_override(bytes_: int | None) -> None:
+    """Compact (or Restore, with `None`): a session-scoped budget for this conversation.
+
+    Session-scoped on purpose. The ratified lever is the `context_history_kib`
+    preference (8-512 KiB, ticket 14 §1) and it belongs to the user's *settings*; a
+    button press is a decision about *this* conversation, so writing it to the
+    preferences would leave it in place for every file opened afterwards. Nothing is
+    written to `userpref.blend`, and reopening Blender restores the preference.
+    """
+    global _budget_override
+    _budget_override = None if bytes_ is None else max(1, int(bytes_))
+
+
+def budget_override() -> int | None:
+    return _budget_override
 
 
 def tag_view3d_redraw() -> int:

@@ -31,6 +31,7 @@ from blender_copilot import (  # noqa: E402
     panel,
     prompt,
     scope,
+    stream,
     toolbox,
     undo,
 )
@@ -39,10 +40,22 @@ from blender_copilot import (  # noqa: E402
 class StubLayout:
     def __init__(self, log):
         self._log = log
-        self.alert = False
+        self._alert = False
         self._enabled = True
         self.alignment = ""
         self._scale_y = 1.0
+
+    @property
+    def alert(self):
+        return self._alert
+
+    @alert.setter
+    def alert(self, value):
+        # Recorded, because "the header row goes red as the window fills" is a
+        # claim about a drawn property and nothing else in this file can see it.
+        self._alert = bool(value)
+        if value:
+            self._log.append(("alert", "", ""))
 
     @property
     def enabled(self):
@@ -468,6 +481,140 @@ def main() -> None:
         instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
         assert "running code" in " ".join(entry[1] for entry in log if entry[0] == "label")
         print("ok   and it goes again when nothing is running")
+
+        # --- the context viewer ------------------------------------------------
+        # Three claims, none of which a CPython test can reach: that the block is
+        # wired into `draw()`, that collapsed and expanded draw different things,
+        # and that the numbers on screen are the projection's own. The arithmetic
+        # behind them is checked in `tests/test_context.py`; this is the drawing.
+        assert "_draw_context" in panel.BLENDER_COPILOT_PT_panel.draw.__code__.co_names, (
+            "the viewer is not called from draw()"
+        )
+        assert "show_context" in panel.BlenderCopilotPreferences.bl_rna.properties.keys(), (
+            "the persisted expander flag is missing"
+        )
+
+        # Collapsed: the heading, the header pair and ONE bar - and none of the
+        # breakdown, because the whole point of collapsing is that a panel which
+        # cannot scroll itself does not spend its height on a diagnostic.
+        settings.show_context = False
+        log = []
+        instance._draw_context(StubLayout(log), panel.wrap_budget(context), settings)
+        drawn = [entry[1] for entry in log if entry[0] == "label"]
+        bars = [entry for entry in log if entry[0] == "progress"]
+        assert "Context Window" in drawn, log
+        assert sum("\u2248" in text and " / " in text for text in drawn) == 1, drawn
+        assert bars and all(entry[1] == "BAR" for entry in bars), bars
+        assert len(bars) == 1, bars
+        assert not [text for text in drawn if text in context_module.USAGE_CATEGORIES], drawn
+        assert ("operator", "blender_copilot.toggle_context", "") in log, log
+        print(
+            f"ok   collapsed: the window, one usage bar, and no breakdown "
+            f"({len(log)} widgets)"
+        )
+
+        # Expanded: the split line, the reserved segment as its own bar, and the action
+        # that compacts. What is drawn must be what the projection reports, and the
+        # comparison is made against `context.share_line` itself rather than against a
+        # retyped expectation - the point of this check is that the panel draws the
+        # arithmetic's answer, not that the arithmetic is right (that is the CPython
+        # suite's job, and it checks the shares sum to 100).
+        settings.show_context = True
+        log = []
+        instance._draw_context(StubLayout(log), panel.wrap_budget(context), settings)
+        drawn = [entry[1] for entry in log if entry[0] == "label"]
+        bars = [entry for entry in log if entry[0] == "progress"]
+        assert len(bars) == 2, bars
+        report = panel.context_report()
+        split = context_module.share_line(report["sizes"])
+        # Every word of the split line is on screen: it is drawn as a wrapped
+        # paragraph, so the labels arrive as several labels rather than one string.
+        joined = " ".join(drawn).replace("\u00b7", " ")
+        for token in split.replace("\u00b7", " ").split():
+            assert token in joined, (token, drawn)
+        assert "Reserved for response" in " ".join(drawn), drawn
+        assert "Reserved for response" in " ".join(drawn), drawn
+        assert ("operator", "blender_copilot.compact", "Compact") in log, log
+        assert ("operator", "blender_copilot.restore_budget", "Restore") not in log, log
+        # The round trip, proven: the figure drawn is the figure `context.usage`
+        # produces from the same projection the request will use.
+        assert any(
+            text == f"Request {panel._size(report['total'])}" for text in drawn
+        ), drawn
+        print(
+            f"ok   expanded: the split line at the projection's own shares, the "
+            f"reserve as a second bar, Compact offered"
+        )
+
+        # The warning state, forced: the numbers cannot reach 75% of a 1M-token
+        # window in a test, so the report is stubbed and the *reaction* to it is
+        # what gets checked. Both halves - the sentence at the threshold, silence
+        # below it - because a warning that always draws is not a warning.
+        real_report = panel.context_report
+        try:
+            for fraction, expected in ((0.60, False), (0.75, True), (0.94, True)):
+                panel.context_report = lambda f=fraction: {
+                    **real_report(),
+                    "fraction": f,
+                    "total": int(f * real_report()["window"]),
+                }
+                log = []
+                instance._draw_context(StubLayout(log), panel.wrap_budget(context), settings)
+                # The first few words, not `CONTEXT_WARN_LINE[:30]`: the sentence is
+                # wrapped before it is drawn, so no single label carries 30 characters
+                # of it - an assertion against the unwrapped prefix failed on a panel
+                # that had drawn the warning correctly.
+                joined = " ".join(
+                    entry[1] for entry in log if entry[0] == "label"
+                )
+                warned = "Quality may decline" in joined
+                assert warned is expected, (fraction, warned, log)
+                alerted = any(entry == ("alert", "", "") for entry in log)
+                assert alerted is expected, (fraction, alerted, log)
+            print(
+                "ok   the warning draws at 75% and above and stays away below it, "
+                "with the header row alerted"
+            )
+        finally:
+            panel.context_report = real_report
+        settings.show_context = False
+
+        # Compact's mechanism, without the button: a session-scoped budget the
+        # projection reads, restorable, and never written to the preferences.
+        assert stream.budget_override() is None, stream.budget_override()
+        before_budget = conversation.session.budget_bytes()
+        stream.set_budget_override(12_345)
+        assert conversation.session.budget_bytes() == 12_345, conversation.session.budget_bytes()
+        stream.set_budget_override(None)
+        assert conversation.session.budget_bytes() == before_budget, (
+            before_budget,
+            conversation.session.budget_bytes(),
+        )
+        stored = bpy.context.preferences.addons.get("blender_copilot")
+        assert stored is None or int(getattr(stored.preferences, "context_history_kib", 0)) == 0, (
+            "Compact must not write the preference"
+        )
+        print("ok   Compact is a session budget the projection reads, and Restore undoes it")
+
+        # The formatters, which are the two things a reader compares against VS
+        # Code directly: `formatTokenCount`'s M-before-1000K rule and the byte
+        # units. Cheap, and they are the numbers a human sees.
+        assert panel._count(1_000_000) == "1.0M", panel._count(1_000_000)
+        assert panel._count(999_960) == "1.0M", panel._count(999_960)
+        assert panel._count(999_400) == "999.4K", panel._count(999_400)
+        assert panel._count(43_100) == "43.1K", panel._count(43_100)
+        assert panel._count(512) == "512", panel._count(512)
+        assert panel._size(1_812_500) == "1.8 MB", panel._size(1_812_500)
+        assert panel._size(4_096) == "4.1 KB", panel._size(4_096)
+        assert panel._size(999) == "999 B", panel._size(999)
+        assert panel._share(1, 4) == "25%" and panel._share(1, 0) == "0%", (
+            panel._share(1, 4),
+            panel._share(1, 0),
+        )
+        assert panel._percent(0.0036) == "0.4%", panel._percent(0.0036)
+        assert panel._percent(0.38) == "38%", panel._percent(0.38)
+        assert panel._percent(1.4) == "100%", panel._percent(1.4)
+        print("ok   the formatters round the way VS Code's do, M before 1000K")
         # The turn this block opened is closed before anything else is drawn:
         # `streaming` is what decides whether the row offers Stop or Send, and the
         # checks below are about Send.

@@ -384,6 +384,38 @@ def main() -> int:
         transport_error = session.transport_error
         check("the turn ended", not session.streaming and session.phase == "idle")
         check("with no transport error", not transport_error)
+
+        # The provider's own token accounting, which the worker now asks for with
+        # `stream_options: {include_usage: true}`. Two claims are being tested at once
+        # and they are separate: that DeepSeek *accepts* the field (a rejection would
+        # have surfaced as the transport error just checked, which is why this probe
+        # carries it at all rather than trusting a localhost stand-in), and that a count
+        # actually comes back. The panel's context viewer prints this as the only
+        # measured figure it has, next to its own byte estimate, so "no usage" has to be
+        # visible here rather than discovered by a user reading a blank line.
+        usage = session.usage
+        note(f"provider usage: {usage}")
+        check("the provider reported token usage", isinstance(usage, dict))
+        if isinstance(usage, dict):
+            check("with a prompt count to show",
+                  isinstance(usage.get("prompt_tokens"), int))
+            check("and a completion count",
+                  isinstance(usage.get("completion_tokens"), int))
+            line = bc.context.measured_line(usage, session.request_bytes)
+            note(f"viewer's measured line: {line!r}")
+            check("which the viewer renders as a measured figure", bool(line))
+            # The calibration datapoint, printed in full: the panel's estimate exists
+            # so that a window in tokens can be compared with a budget in bytes, and
+            # only a real request can say how far off it is.
+            sent = session.request_bytes
+            if isinstance(sent, int) and isinstance(usage.get("prompt_tokens"), int) \
+                    and usage["prompt_tokens"]:
+                note(
+                    f"calibration: {sent} bytes sent for "
+                    f"{usage['prompt_tokens']} prompt tokens = "
+                    f"{sent / usage['prompt_tokens']:.2f} bytes/token "
+                    f"(the panel estimates {bc.context.BYTES_PER_TOKEN})"
+                )
         # The working strip is drawn whenever a turn is in flight, so a real turn
         # that was sampled while in flight is evidence that a human watching this
         # saw something moving. What the samples say is the report's business: the

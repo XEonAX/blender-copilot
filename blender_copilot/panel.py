@@ -203,6 +203,15 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
         default=True,
     )
 
+    show_context: bpy.props.BoolProperty(
+        name="Context details",
+        description=(
+            "Show the context viewer expanded in the panel: what this request is made "
+            "of, what it costs, and what the projection is doing to it"
+        ),
+        default=False,
+    )
+
     # Ticket 14 §1's lever, and the only setting that reads the budget. 0 ships,
     # because the derivation is now the better answer: it is sized from the
     # provider's own window rather than from the 32k floor the design assumed. The
@@ -469,6 +478,69 @@ class BLENDER_COPILOT_OT_toggle_detail(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class BLENDER_COPILOT_OT_toggle_context(bpy.types.Operator):
+    bl_idname = "blender_copilot.toggle_context"
+    bl_label = "Toggle context details"
+    bl_description = "Show or hide the context viewer's breakdown"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        settings = prefs(context)
+        if settings is None:
+            return {"CANCELLED"}
+        settings.show_context = not settings.show_context
+        stream.tag_view3d_redraw()
+        return {"FINISHED"}
+
+
+class BLENDER_COPILOT_OT_compact(bpy.types.Operator):
+    bl_idname = "blender_copilot.compact"
+    bl_label = "Compact"
+    bl_description = (
+        "Show the model fewer older turns for the rest of this session. The transcript "
+        "and the stored conversation are untouched"
+    )
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        session = conversation.session
+        if session.streaming:
+            # The budget is read once per round, so changing it mid-turn would change
+            # what the *next* round of a request already in flight carries - a strange
+            # thing to do to somebody who just pressed a button about context. Refusing
+            # is also honest: nothing they can see would explain a mid-flight change.
+            self.report({"WARNING"}, "Wait for the turn to finish")
+            return {"CANCELLED"}
+        # Half of what the model currently sees, floored at the shipped minimum (8 KiB)
+        # and capped at the derived budget. Half is the target that is always *below*
+        # the current figure, so pressing the button always does something visible on a
+        # conversation that has outgrown the budget, and the floor keeps it from
+        # collapsing a tiny conversation to nothing.
+        #
+        # This is truncation, not summarisation: `context.plan` drops older turns whole
+        # and says so (ticket 14 §3 rejected model-written summaries for a stated
+        # reason). VS Code's Compact asks the model to summarise; this one does not, and
+        # the panel copy says so rather than implying parity it does not have.
+        target = max(context.MIN_BUDGET_KIB * 1024, session.history_bytes() // 2)
+        stream.set_budget_override(min(target, context.DEFAULT_HISTORY_BUDGET_BYTES))
+        mirror_transcript()
+        stream.tag_view3d_redraw()
+        return {"FINISHED"}
+
+
+class BLENDER_COPILOT_OT_restore_budget(bpy.types.Operator):
+    bl_idname = "blender_copilot.restore_budget"
+    bl_label = "Restore budget"
+    bl_description = "Stop compacting: go back to the history budget the preferences ask for"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        stream.set_budget_override(None)
+        mirror_transcript()
+        stream.tag_view3d_redraw()
+        return {"FINISHED"}
+
+
 class BLENDER_COPILOT_OT_show_code(bpy.types.Operator):
     bl_idname = "blender_copilot.show_code"
     bl_label = "Show code"
@@ -599,6 +671,145 @@ def wrap_budget(context) -> int:
 PROSE_SCALE_Y = 0.75
 
 
+# ---------------------------------------------------------------------------
+# The context viewer (VS Code's Session Info, built from what is knowable here)
+#
+# The panel can tell the user three different things about context, and it is worth
+# being precise about which is which, because two of them are estimates:
+#
+#   * BYTES: what this add-on's budget, eviction order and trim report are measured
+#     in (ticket 14 §1). Exact, and it is the unit the projection acts on.
+#   * TOKENS: what the model bills and what the provider's own window is stated in.
+#     Converted here at `context.BYTES_PER_TOKEN` - the same estimate the output
+#     reserve uses - so every token figure drawn from bytes is prefixed with `\u2248`.
+#   * MEASURED TOKENS: the provider's `usage` block from the last response, when it
+#     sent one. A count, not an estimate, and drawn as such.
+#
+# VS Code's popover shows measured counts because it sits on a fetch loop that
+# reports them; this add-on does not have one, so the viewer shows bytes it is sure
+# of and marks the conversions. An estimate passed off as a count is the failure mode
+# this section exists to avoid.
+# ---------------------------------------------------------------------------
+CONTEXT_NOTE_LINES = (
+    "Tokens are estimated at 3 bytes each. Bytes are exact, and are what the "
+    "history budget measures.",
+    "Compact shows the model fewer older turns for this session. Your transcript "
+    "and the stored conversation are untouched - unlike VS Code's Compact, nothing "
+    "is summarised, so nothing is invented.",
+)
+
+# VS Code's own thresholds, from `chatContextUsageDetails.ts`: an amber-ish state from
+# 75% and a red one from 90%, with "Quality may decline as limit nears." at 75%. Blender
+# has no amber - `UILayout.alert` is a single red - so both states raise the same flag
+# and the sentence is what distinguishes them. Copied rather than invented because the
+# point of the number is to line up with a convention the user already reads.
+CONTEXT_WARN_AT = 0.75
+CONTEXT_DANGER_AT = 0.90
+CONTEXT_WARN_LINE = (
+    "Quality may decline as the limit nears. Compact to give the model fewer "
+    "older turns."
+)
+_CONTEXT_REPORT: dict = {"key": None, "report": None}
+
+
+# A box costs horizontal room that `wrap_budget` does not know about: it is measured
+# against the *region* (region width - UI_INSET_PX, over PX_PER_CHAR). MEASURED from
+# `logs/context-view-expanded.png`, 2026-09-26: the region is 335 px, so `wrap_budget`
+# returns 43 characters, and a 43-character line inside a box was middle-clipped to
+# "system 35% \u00b7 tools 53% \u00b7 messages \u2026" - about 37 characters on screen. The six
+# is that difference, and it is only applied to text drawn *inside* a box.
+BOX_WRAP_INSET = 6
+
+
+def box_wrap(text: str, budget: int) -> list[str]:
+    """`text` wrapped to fit inside a box, which is narrower than the region."""
+    return conversation.wrap(text, max(MIN_WRAP_CHARS, budget - BOX_WRAP_INSET))
+
+
+def _size(bytes_: int) -> str:
+    """Bytes as a short label: `4.1 KB`, `1.7 MB`. Decimal, like a file manager."""
+    if bytes_ >= 1_000_000:
+        return f"{bytes_ / 1_000_000:.1f} MB"
+    if bytes_ >= 1_000:
+        return f"{bytes_ / 1_000:.1f} KB"
+    return f"{int(bytes_)} B"
+
+
+def _count(tokens: int, decimals: int = 1) -> str:
+    """Tokens the way VS Code's own popover writes them: `43.1K`, `1.0M`.
+
+    The threshold is VS Code's (`formatTokenCount` in `chatContextUsageDetails.ts`):
+    `M` as soon as `K` would round up to `1000K`, which is why the cut sits at
+    `1e6 - 500 * 10^-decimals` rather than at a flat million.
+    """
+    tokens = int(tokens)
+    if tokens >= 1_000_000 - 500 * (10 ** -decimals):
+        return f"{tokens / 1_000_000:.{decimals}f}M"
+    if tokens >= 1_000:
+        return f"{tokens / 1_000:.{decimals}f}K"
+    return str(tokens)
+
+
+def _share(part: int, whole: int) -> str:
+    """`part` as a percentage of `whole`, guarded against a zero window."""
+    if not whole:
+        return "0%"
+    return f"{part / whole * 100:.0f}%"
+
+
+def _percent(fraction: float) -> str:
+    """The window-used figure, with a decimal while it is small.
+
+    VS Code uses a flat `toFixed(0)` here, and against a 1M-token window that prints
+    `0%` for everything under 10 KB - a live panel showing "0%" until the fifth turn
+    reads as broken, not as roomy. So one decimal below 10% and whole numbers above,
+    which is the same convention the byte sizes use.
+    """
+    value = max(0.0, min(1.0, fraction)) * 100
+    return f"{value:.1f}%" if value < 10 else f"{value:.0f}%"
+
+
+def context_report() -> dict:
+    """The viewer's numbers, taken from the projection that will actually be sent.
+
+    `context.plan` rather than `Conversation.build_messages`, on purpose: `plan`
+    copies and reports while `build_messages` also appends the trim note and latches
+    it, and a *draw* must not write to the transcript. This is the same call
+    `Conversation.trimmed` already makes on every repaint and the same one the next
+    request makes, so what the viewer shows is what the model gets rather than a
+    second opinion about it.
+
+    Memoised on the four things that can change the answer. The expensive half is
+    `prompt.context()`, which walks the scene to build the live summary, and the panel
+    repaints ten times a second while a turn streams - so an unmemoised report would
+    rewalk the scene per frame. The history only grows when a turn settles, so a turn
+    costs one walk rather than a thousand. The measured usage is *not* cached: it is
+    the provider's own count and can change with every response.
+    """
+    session = conversation.session
+    budget = session.budget_bytes()
+    key = (session.generation, len(session.history), budget, session.turn_start)
+    if _CONTEXT_REPORT["key"] != key:
+        projected, report = context.plan(session.history, budget, session.turn_start)
+        base_prompt, summary = prompt.context()
+        usage = context.usage(
+            projected,
+            base_prompt=base_prompt,
+            schemas=toolbox.SCHEMAS,
+            summary=summary,
+        )
+        usage["report"] = report
+        usage["kept_bytes"] = session.history_bytes()
+        usage["history_messages"] = len(session.history)
+        usage["sent_messages"] = len(projected)
+        usage["cached_bytes"] = budget
+        _CONTEXT_REPORT["key"] = key
+        _CONTEXT_REPORT["report"] = usage
+    usage = dict(_CONTEXT_REPORT["report"])
+    usage["measured"] = context.measured_line(session.usage, session.request_bytes)
+    return usage
+
+
 def prose(layout, lines, icon="NONE"):
     """Draw already-wrapped `lines` as one tight paragraph.
 
@@ -673,6 +884,10 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         # the turn the receipt describes.
         if not newest_first:
             self._draw_receipt(layout, budget)
+        # Below the transcript, with the other meta-information rather than in the live
+        # cluster: it is about the *request*, it is collapsed to one line by default,
+        # and the two blocks under it say what happens to the record itself.
+        self._draw_context(layout, budget, settings)
         self._draw_coverage(layout, budget)
         self._draw_history(layout, budget)
         self._draw_variant_picker(layout, settings)
@@ -884,6 +1099,130 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             head.label(text="running code", icon="TIME")
             for line in budget.RUNNING_LINES:
                 prose(note, conversation.wrap(line, wrap_chars))
+
+    def _draw_context(self, layout, budget, settings):
+        """What the next request is made of, what it costs, and what the projection does to it.
+
+        Shaped after VS Code's `chatContextUsageDetails.ts` - the same header pair
+        (used / window tokens, then a whole-number percentage), the same single
+        progress bar with the **reserved output** drawn as a second, separate segment,
+        and the same 75%/90% thresholds. Two things necessarily differ, and both are
+        stated on screen rather than papered over:
+
+        * The token figures here are *converted from bytes* at
+          `context.BYTES_PER_TOKEN`, so they are prefixed `\\u2248`. VS Code's come from
+          its fetch layer as counts. When the provider reports a real count this draw
+          shows it as well, as measured.
+        * The per-category percentages are shares of **this request**, where VS Code
+          displays them as shares of the **window** (`(percentageOfPrompt / 100) *
+          contextWindowPercentage`). At VS Code's fill level the two are nearly the
+          same number; here the request is around 1% of the window, so window-relative
+          shares would be five rows of "0.0%" - true, and useless. The header shows the
+          window-relative figure, the rows show request-relative, and both say which.
+
+        Collapsed to one line by default: it is a diagnostic, and a panel that cannot
+        scroll itself should not spend a third of its height on diagnostics. The
+        collapsed line carries the two numbers worth glancing at, plus VS Code's
+        warning colour once the window is 75% full - so the common questions ("am I near
+        the limit?" and "is anything wrong?") cost no click.
+
+        Every figure comes from `context_report()`, i.e. from the projection itself. The
+        categories are `context.USAGE_CATEGORIES`, so the arithmetic and the labels live
+        in the bpy-free module the CPython suite can disagree with, and this method only
+        decides how they are stacked.
+        """
+        report = context_report()
+        box = layout.box()
+        expanded = bool(getattr(settings, "show_context", False))
+        fraction = report["fraction"]
+        reserve_fraction = (
+            report["reserved"] / report["window"] if report["window"] else 0.0
+        )
+        nearing = fraction >= CONTEXT_WARN_AT
+
+        box.label(text="Context Window")
+        head = box.row(align=True)
+        head.alert = nearing
+        # No `tokens` word: the heading above says which pair this is, and the word was
+        # what pushed the row past the sidebar's width - MEASURED on screen, 2026-09-26,
+        # where it rendered as "\u22483.6K / 1.0M to\u2026". Blender middle-clips, so a row
+        # that is one word too long loses its last number rather than wrapping.
+        head.label(text=f"\u2248{_count(report['tokens'])} / {_count(report['window_tokens'])}")
+        head.label(text=_percent(fraction))
+        head.operator(
+            "blender_copilot.toggle_context",
+            text="",
+            icon="TRIA_DOWN" if expanded else "TRIA_RIGHT",
+        )
+
+        # Two bars rather than VS Code's one two-segment bar, because `progress` draws
+        # one factor from the left edge and cannot stack segments. The pair carries the
+        # same information: what is used, and what is held back for the reply. The usage
+        # bar stays when collapsed, because a percentage with no bar is the one thing
+        # the popover exists to show at a glance.
+        used = box.row()
+        used.progress(factor=fraction, type="BAR")
+        if not expanded:
+            if nearing:
+                prose(box, conversation.wrap(CONTEXT_WARN_LINE, budget), icon="ERROR")
+            return
+
+        legend = box.row(align=True)
+        legend.label(text=f"Request {_size(report['total'])}")
+        legend.label(text=f"\u2248{_count(report['tokens'])} tok")
+        reserved = box.row()
+        reserved.progress(factor=min(1.0, reserve_fraction), type="BAR")
+        # VS Code's own legend text, on a wrapped line rather than in a two-label row.
+        # MEASURED: as a row it rendered "Reserved for resp\u2026" (the pair was ~32
+        # characters and the row gives each label half the width), while a wrapped line
+        # loses nothing.
+        prose(box, box_wrap(
+            f"Reserved for response \u2248{_count(report['reserved_tokens'], decimals=0)} "
+            f"\u00b7 {_share(report['reserved'], report['window'])}",
+            budget,
+        ))
+
+        # The breakdown, as one tight wrapped line per `context.share_line` - see its
+        # docstring for why not one row per category. VS Code's "Uncategorized / Other"
+        # bucket is not needed, because these categories are a partition of a total
+        # computed here and the shares are made to sum to exactly 100%.
+        prose(box, box_wrap(context.share_line(report["sizes"]), budget))
+
+        # What the projection did, in the numbers the trim report already carries.
+        # `sent` against `history` is the honest pair: the model's view and the record.
+        # A wrapped line, not a two-label row: "Model sees 5/5 msgs" beside
+        # "1.8 MB budget" clipped the first label at "Model sees 5/5 \u2026" on screen.
+        source = "Compact" if stream.budget_override() is not None else "budget"
+        prose(box, box_wrap(
+            f"Model sees {report['sent_messages']}/{report['history_messages']} msgs "
+            f"\u00b7 {source} {_size(report['cached_bytes'])}",
+            budget,
+        ))
+        # The actions go here, ABOVE the explanation, and that placement is deliberate:
+        # the explanatory lines are prose and can run past the fold in a short sidebar,
+        # while a button that cannot be reached is a button that does not exist. The
+        # pictures in `logs/context-view-expanded.png` are what settled it - the notes
+        # filled the last visible rows and pushed the button off the bottom edge.
+        actions = box.row(align=True)
+        actions.operator("blender_copilot.compact", text="Compact", icon="FULLSCREEN_EXIT")
+        if stream.budget_override() is not None:
+            actions.operator("blender_copilot.restore_budget", text="Restore", icon="LOOP_BACK")
+
+        dropped = report["report"]["turns_dropped"]
+        if dropped:
+            prose(box, box_wrap(
+                f"{dropped} turn(s) dropped from what the model is sent; "
+                "your transcript keeps every one.", budget))
+
+        measured = report["measured"]
+        if measured:
+            prose(box, box_wrap(measured, budget))
+
+        if nearing:
+            prose(box, box_wrap(CONTEXT_WARN_LINE, budget), icon="ERROR")
+
+        for line in CONTEXT_NOTE_LINES:
+            prose(box, box_wrap(line, budget))
 
     def _draw_coverage(self, layout, budget):
         box = layout.box()
