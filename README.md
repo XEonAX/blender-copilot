@@ -25,7 +25,7 @@ Blender's Python, so `bpy.context` is live and correct by construction.
 <sub>**Five prompts, one spaceship — recorded from a real Blender 5.2.2 session against
 a real model.** The panel, the loop, the sandbox that runs the model's code, the
 transcript rows and the undo receipt are the shipped add-on; the code is the model's.
-The GIF is the build, cut to 17 s; the flight is played at the end of the
+The GIF is the build, cut to 18 s; the flight is played at the end of the
 [video below](#five-sentences-one-spaceship), because a GIF cannot hold motion and an
 animation that is never played looks exactly like no animation at all.</sub>
 
@@ -58,19 +58,19 @@ built.
 
 | # | Prompt (verbatim) | What came back |
 |---|---|---|
-| 1 | Make a scifi looking spaceship. It should look scifi-y and aesthetically pleasing - a sleek single-seat interceptor with one coherent silhouette: symmetric swept wings, engine nacelles faired into the hull rather than bolted on top, and a canopy that reads as cockpit glass. | A lofted interceptor hull, swept tapered wings, a teardrop canopy, engine bells with glow discs, four materials, and a four-light rig over a dark blue world. |
-| 2 | Add RCS thrusters to get 6DoF flight | 16 RCS bells on the hull surface, 16 hardpoint empties parented to it, and a check that the rig covers force *and* torque in six axes. |
-| 3 | Make the RCS thrusters match the scifi look. And also position them properly. | It rebuilt them twice — axis-planned ports, then 45°-solved quadrant angles, then fairing-symmetric ones — verifying each time that the firing sets produce clean wrenches. |
-| 4 | Give the entire Spaceship a nice flying animation. Make it smooth and continuous - eased keyframes, no sudden jumps - and slow enough to follow. | An eased, loopable flight keyed onto the hull, then *"verify flight curve smoothness and easing frame by frame"*. |
-| 5 | Add exhaust flames to main thrusters as well as RCS thrusters. animate the RCS thrusters to fire in sync with the animated motion. they should fire the correct ones so that expected motion should happen. | Emissive main-engine plumes, 16 RCS plumes on the hardpoints, and a firing schedule derived from the motion — *"which thrusters fire, from the motion itself"* — re-keyed twice to fix the coupling, then verified against the intended directions. |
+| 1 | Make a scifi looking spaceship. It should look scifi-y | A faceted stealth hull, swept wings and an integrated tail fin, nacelles with glow discs, a canopy, four materials, bevel modifiers — and its own hero camera, three lights and dark world. |
+| 2 | Add RCS thrusters to get 6DoF flight | Four RCS pods carrying 24 nozzle bells, given their own materials, then a read-back of every nozzle's exhaust direction. |
+| 3 | Make the RCS thrusters match the scifi look. And also position them properly. | It rebuilt the pods four times and **ray-cast every nozzle to prove the exhaust path was clear** — diagnosing a self-hit on the aft bells, canting the nozzles 35° outboard, moving the aft cassettes out to the wingtips, then re-verifying all 20. |
+| 4 | Give the entire Spaceship a nice flying animation. Make it smooth. Roll and sway. | A `Ship_Rig` empty with all 12 meshes parented to it, baked sinusoidal roll and sway, then *"compare evaluated curve values against the exact sine per channel"* — plus pre-roll and post-roll keys to fix the tangent at the loop seam. |
+| 5 | Add exhaust flames to main thrusters as well as RCS thrusters. animate the RCS thrusters to fire in sync with the animated motion. they should fire the correct ones so that expected motion should happen. | 22 plumes as a single mesh driven by **per-nozzle shape keys**, flame intensity baked to the ship's own accelerations, then the firing signs rechecked against a volume-based centre of mass. |
 
 The video, in one file: the build at a readable pace, then **the animation played at
 its own frame rate** — every frame the model keyframed, at 24 fps, at the end.
 
-https://github.com/user-attachments/assets/c6e82cae-92da-41d8-949d-87be7b14ed0b
+https://github.com/user-attachments/assets/517c3c50-036b-459a-ae45-2f910dcc7654
 
 <div align="center">
-<img src="docs/media/hero.png" width="880" alt="The finished interceptor in the viewport: swept wings, canopy, engine nozzles and two exhaust plumes, with the panel's undo receipt beside it.">
+<img src="docs/media/hero.png" width="880" alt="The finished interceptor in the viewport: a dark faceted stealth hull with swept wings, a tail fin, a blue canopy and 22 exhaust plumes firing, with the panel's undo receipt beside it.">
 </div>
 
 <sub>The last frame at full size — a GIF is too small to see the detail and a video is
@@ -84,10 +84,10 @@ awkward to stop on the frame you want.</sub>
 
 | Measured, from that run | |
 |---|---|
-| Wall clock, all five turns | **1278 s** (21 min) |
-| Model calls | **56**, of which **8** were read-only lookups (`get_rna_info`, `get_scene_info`) before it touched anything |
-| Provider usage | **194,113** prompt tokens — **189,312 of them cached** — 1,403 completion |
-| The last turn's receipt | `objects: 25 → 43`, `MESH: 5 → 23` — 16 plumes and the rest, added as one step |
+| Wall clock, all five turns | **917 s** (15 min) |
+| Model calls | **52**, of which **4** were read-only `get_rna_info` lookups before it touched anything |
+| Provider usage | **109,016** prompt tokens — **106,880 of them cached** — 1,236 completion, 739 of those reasoning |
+| The last turn's receipt | `objects: 17 → 18`, `MESH: 12 → 13` — the flame rig, added as one step |
 
 ### What the harness stages, and what it does not
 
@@ -104,9 +104,13 @@ Stated plainly, because a recording of an agent should say where the agent stops
 - It **writes no scene code**. In this mode `tools/demo_capture.py` contributes no
   `bpy` at all — five sentences go in and the geometry comes back.
 
-The one caveat worth naming: this take predates the capture recording the scene's frame
-rate, so the playback rate is Blender's default 24 fps rather than a measured value.
-The capture records it now; the next take will be exact.
+The playback rate is not a guess. The capture reads the scene's frame rate and this take
+logged `scene fps: 24`, which is the number the composer used to time the flight — so the
+rate the animation was authored at is the rate you see.
+
+The previous take could not say that: it predates the capture logging the frame rate, so
+its flight was timed off Blender's default 24 fps on faith. Same number, but one was
+measured and one was assumed.
 
 ## The idea
 
@@ -142,14 +146,14 @@ What is missing is listed under
 | **Agent loop** | Up to 8 rounds / 24 tool calls per turn (both are levers now), with a repeat-signature stop and a consecutive-failure stop. **One step per timer tick** — nothing can block the UI thread. |
 | **Tools** | Three, deliberately: `run_blender_python` (fresh namespace per call, a required `purpose`, and the full traceback on failure), `get_scene_info` (counts and a bounded list — never a scene dump), `get_rna_info` (exact-name lookup against the live build, because a hand-maintained API list rots). |
 | **Undo** | **One step per turn**, pushed at the end in a `finally`, labelled in Undo History. The receipt beside the transcript is a pre/post diff of the scene summary. |
-| **Context** | A request-time projection of the conversation, measured in UTF-8 bytes against a 48,000-byte budget and **never written back** to the store. The live scene summary rides last as a second `system` message, so the base prompt keeps index 0 and the provider's cache prefix survives — 97% of those 194,113 prompt tokens were cache hits. |
+| **Context** | A request-time projection of the conversation, measured in UTF-8 bytes against a 48,000-byte budget and **never written back** to the store. The live scene summary rides last as a second `system` message, so the base prompt keeps index 0 and the provider's cache prefix survives — 98% of those 109,016 prompt tokens were cache hits. |
 | **History** | JSON outside the `.blend`, scoped per file path with an alias on Save-As. 200 messages / 1 MiB, pruned by whole turn. |
 | **Streaming and Stop** | SSE from a subprocess; `Stop` replaces `Send` in the same slot, and the panel states exactly what Stop can and cannot interrupt. |
 
 ### The receipt, and the one Ctrl+Z
 
 <div align="center">
-<img src="docs/media/receipt.png" width="417" alt="The panel's undo receipt: Undoable, objects: 25 -&gt; 43, MESH: 5 -&gt; 23, collections changed, Ctrl+Z reverts this turn, and what undo does not cover.">
+<img src="docs/media/receipt.png" width="417" alt="The panel's undo receipt: Undoable, objects: 17 -&gt; 18, MESH: 12 -&gt; 13, collections changed, Ctrl+Z reverts this turn, and what undo does not cover.">
 </div>
 
 A turn that changed the scene leaves one step in Undo History, named after the prompt.
@@ -286,7 +290,7 @@ are consequences of ratified decisions, not oversights:
   turn, not the `numpy` call already inside the interpreter.
 - **`blender -b` is out of scope by construction.** Timers and modal operators do not
   fire headless, and the loop is built on timers.
-- **Turns are slow when the model thinks.** 21 minutes for the five above; the model
+- **Turns are slow when the model thinks.** 15 minutes for the five above; the model
   spent most of it working, and thinking is on by default at the provider and billed as
   completion tokens. The byte budget and `Stop` exist for exactly that.
 

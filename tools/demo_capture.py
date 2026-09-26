@@ -181,14 +181,10 @@ LIVE_PROMPTS = [
     # should be, and a blue oval stuck on the nose. The owner's addition was "and
     # aesthetically pleasing"; the clause after it names the three failures that
     # produced, because "make it look good" is not a direction.
-    "Make a scifi looking spaceship. It should look scifi-y and aesthetically pleasing "
-    "- a sleek single-seat interceptor with one coherent silhouette: symmetric swept "
-    "wings, engine nacelles faired into the hull rather than bolted on top, and a "
-    "canopy that reads as cockpit glass.",
+    "Make a scifi looking spaceship. It should look scifi-y",
     "Add RCS thrusters to get 6DoF flight",
     "Make the RCS thrusters match the scifi look. And also position them properly.",
-    "Give the entire Spaceship a nice flying animation. Make it smooth and "
-    "continuous - eased keyframes, no sudden jumps - and slow enough to follow.",
+    "Give the entire Spaceship a nice flying animation. Make it smooth. Roll and sway.",
     "Add exhaust flames to main thrusters as well as RCS thrusters. animate the RCS "
     "thrusters to fire in sync with the animated motion. they should fire the correct "
     "ones so that expected motion should happen.",
