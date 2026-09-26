@@ -1,59 +1,196 @@
-# blender.anx.copilot
+<div align="center">
 
-A Copilot-style chat panel that lives **inside Blender**. Development happens
-here; `/Users/user/Projects/blender` is a read-only reference clone.
+# Blender Copilot
 
-**Status: prototype.** The panel renders a canned conversation and a fake
-streaming reply. No model is called, no tool is executed, nothing is persisted.
-Its only job is to prove the panel is a viable chat surface before an agent loop
-is built on it. The route from here is charted in
-[`.scratch/blender-copilot/map.md`](.scratch/blender-copilot/map.md) — eighteen
-tickets: **fourteen resolved**, two that need a human, two open. Every decision in
-there was made by an agent with nobody in the loop, and then **ruled on by the
-project owner on 2026-09-25** — fifteen accepted as written, one rejected. The
-rejection was the approval gate, so model-authored code auto-runs unscoped; the
-reasoning and its consequences are in
-[`docs/ratification.md`](docs/ratification.md).
+**A chat panel that lives *inside* Blender.** It runs an agent loop in Blender's own
+Python process, executes the model's `bpy` against your live scene, and wraps the
+whole turn in **one Ctrl+Z**.
 
-## Layout
+![Blender](https://img.shields.io/badge/Blender-5.2.2-E87D0D?logo=blender&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.13%20%28bundled%29-3776AB?logo=python&logoColor=white)
+![Provider](https://img.shields.io/badge/provider-DeepSeek%20%C2%B7%20OpenAI--compatible-4D6BFE)
+![Suites](https://img.shields.io/badge/CPython%20suites-4%2C%20green-brightgreen)
+![Tickets](https://img.shields.io/badge/wayfinder%20tickets-18%2F18%20resolved-blue)
+![Status](https://img.shields.io/badge/status-prototype-yellow)
+![Licence](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue)
 
+<img src="docs/media/turn.gif" width="880" alt="Five turns in the Copilot panel: a prompt, streamed reasoning, tool rows, and a spaceship being built in the viewport next to it.">
+
+<sub>**Five prompts, one spaceship — recorded from a real Blender 5.2.2 session against
+a real model.** The panel, the loop, the sandbox that runs the model's code, the
+transcript rows and the undo receipt are the shipped add-on; the code is the model's.
+The GIF is the build, cut to 17 s; the flight is played at the end of the
+[video below](#five-sentences-one-spaceship), because a GIF cannot hold motion and an
+animation that is never played looks exactly like no animation at all.</sub>
+
+</div>
+
+---
+
+## Five sentences, one spaceship
+
+Sent one after another, as a conversation. Each prompt is a *step*, not a
+specification — the third only means anything against the object the second one
+built.
+
+| # | Prompt (verbatim) | What came back |
+|---|---|---|
+| 1 | Make a scifi looking spaceship. It should look scifi-y and aesthetically pleasing - a sleek single-seat interceptor with one coherent silhouette: symmetric swept wings, engine nacelles faired into the hull rather than bolted on top, and a canopy that reads as cockpit glass. | A lofted interceptor hull, swept tapered wings, a teardrop canopy, engine bells with glow discs, four materials, and a four-light rig over a dark blue world. |
+| 2 | Add RCS thrusters to get 6DoF flight | 16 RCS bells on the hull surface, 16 hardpoint empties parented to it, and a check that the rig covers force *and* torque in six axes. |
+| 3 | Make the RCS thrusters match the scifi look. And also position them properly. | It rebuilt them twice — axis-planned ports, then 45°-solved quadrant angles, then fairing-symmetric ones — verifying each time that the firing sets produce clean wrenches. |
+| 4 | Give the entire Spaceship a nice flying animation. Make it smooth and continuous - eased keyframes, no sudden jumps - and slow enough to follow. | An eased, loopable flight keyed onto the hull, then *"verify flight curve smoothness and easing frame by frame"*. |
+| 5 | Add exhaust flames to main thrusters as well as RCS thrusters. animate the RCS thrusters to fire in sync with the animated motion. they should fire the correct ones so that expected motion should happen. | Emissive main-engine plumes, 16 RCS plumes on the hardpoints, and a firing schedule derived from the motion — *"which thrusters fire, from the motion itself"* — re-keyed twice to fix the coupling, then verified against the intended directions. |
+
+The video, in one file: the build at a readable pace, then **the animation played at
+its own frame rate** — every frame the model keyframed, at 24 fps, at the end.
+
+https://github.com/user-attachments/assets/c6e82cae-92da-41d8-949d-87be7b14ed0b
+
+<div align="center">
+<img src="docs/media/hero.png" width="880" alt="The finished interceptor in the viewport: swept wings, canopy, engine nozzles and two exhaust plumes, with the panel's undo receipt beside it.">
+</div>
+
+<sub>The last frame at full size — a GIF is too small to see the detail and a video is
+awkward to stop on the frame you want.</sub>
+
+<div align="center">
+<img src="docs/media/flight.png" width="880" alt="Six poses from the flight, side by side: the interceptor rolling and pitching with plumes firing.">
+</div>
+
+<sub>The flight as stills, for anyone who looks away during a loop.</sub>
+
+| Measured, from that run | |
+|---|---|
+| Wall clock, all five turns | **1278 s** (21 min) |
+| Model calls | **56**, of which **8** were read-only lookups (`get_rna_info`, `get_scene_info`) before it touched anything |
+| Provider usage | **194,113** prompt tokens — **189,312 of them cached** — 1,403 completion |
+| The last turn's receipt | `objects: 25 → 43`, `MESH: 5 → 23` — 16 plumes and the rest, added as one step |
+
+### What the harness stages, and what it does not
+
+Stated plainly, because a recording of an agent should say where the agent stops:
+
+- It **empties Blender's default file** first (a Cube, a Camera and a Light — the cube
+  sits exactly where a spaceship gets built), opens the sidebar, and re-frames the
+  camera as geometry appears. The model's own *"switch 3D viewports to Rendered
+  shading"* is what gives the picture its dark backdrop; the world and the lights are
+  the model's, not the harness's.
+- It **steps the timeline** to photograph the animation, one frame per tick, and the
+  composer plays those frames back at the scene's rate. That is the harness pressing
+  play, and nothing else.
+- It **writes no scene code**. In this mode `tools/demo_capture.py` contributes no
+  `bpy` at all — five sentences go in and the geometry comes back.
+
+The one caveat worth naming: this take predates the capture recording the scene's frame
+rate, so the playback rate is Blender's default 24 fps rather than a measured value.
+The capture records it now; the next take will be exact.
+
+## The idea
+
+Every Blender AI tool has to answer one question: how does the model's code reach your
+scene? Most answer it with a bridge — a socket, a file mailbox, a Node sidecar, a
+second process holding a copy of the scene that has to be kept in sync.
+
+This one answers it with `exec`. The loop runs **in Blender's Python process**, so
+`bpy.context` is live and correct by construction: the same objects, the same
+selection, the same mode, the same undo stack. Nothing needs mirroring because nothing
+is on the other side.
+
+That choice has consequences, and the interesting part of this project is that most of
+them were **measured rather than assumed** — see
+[what is measured](#what-is-measured-not-claimed). Some are uncomfortable, and they are
+written down anyway.
+
+**Where this stands.** A working vertical slice inside a real Blender 5.2.2: the panel,
+the loop, the three tools, per-turn undo, streaming, the context budget and per-`.blend`
+history all run, and every picture here came out of an actual GUI session. It is **not**
+published to the extensions platform yet, and the manifest's licence line is still
+marked a placeholder. What is missing is listed under
+[what it does not do](#what-it-does-not-do) rather than left to be found.
+
+## What it does
+
+| | |
+|---|---|
+| **Panel** | The 3D Viewport sidebar, `N` → **Copilot**. Labelled user turns, one bordered box per assistant turn, tool rows with output behind an expander, errors as first-class blocks, and a busy indicator that only redraws while a turn is live. |
+| **Agent loop** | Up to 8 rounds / 24 tool calls per turn (both are levers now), with a repeat-signature stop and a consecutive-failure stop. **One step per timer tick** — nothing can block the UI thread. |
+| **Tools** | Three, deliberately: `run_blender_python` (fresh namespace per call, a required `purpose`, and the full traceback on failure), `get_scene_info` (counts and a bounded list — never a scene dump), `get_rna_info` (exact-name lookup against the live build, because a hand-maintained API list rots). |
+| **Undo** | **One step per turn**, pushed at the end in a `finally`, labelled in Undo History. The receipt beside the transcript is a pre/post diff of the scene summary. |
+| **Context** | A request-time projection of the conversation, measured in UTF-8 bytes against a 48,000-byte budget and **never written back** to the store. The live scene summary rides last as a second `system` message, so the base prompt keeps index 0 and the provider's cache prefix survives — 97% of those 194,113 prompt tokens were cache hits. |
+| **History** | JSON outside the `.blend`, scoped per file path with an alias on Save-As. 200 messages / 1 MiB, pruned by whole turn. |
+| **Streaming and Stop** | SSE from a subprocess; `Stop` replaces `Send` in the same slot, and the panel states exactly what Stop can and cannot interrupt. |
+
+### The receipt, and the one Ctrl+Z
+
+<div align="center">
+<img src="docs/media/receipt.png" width="417" alt="The panel's undo receipt: Undoable, objects: 25 -&gt; 43, MESH: 5 -&gt; 23, collections changed, Ctrl+Z reverts this turn, and what undo does not cover.">
+</div>
+
+A turn that changed the scene leaves one step in Undo History, named after the prompt.
+One `Ctrl+Z` takes the whole turn back — every call in it, not the last one. The receipt
+says what the step covers and, in the same box, what it does not: *local scene data
+only, not files, network, preferences or Python state*. That sentence is not decoration;
+it is the boundary the probes measured.
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph BP["Blender process — main thread"]
+        direction TB
+        UI["Copilot panel<br/>3D Viewport sidebar"]
+        TICK["stream._tick()<br/>one step per timer tick"]
+        SBX["sandbox<br/>fresh namespace + bpy prelude"]
+        UI -->|Send| TICK
+        TICK -->|at most one call| SBX
+        SBX --> SCENE[("your live scene")]
+        TICK -->|"one push, at the end, in a finally"| UNDO[("undo stack")]
+    end
+    TICK <-->|"newline-delimited JSON<br/>over stdin / stdout"| W["_worker.py<br/>Blender's own python3.13"]
+    W <-->|HTTPS + SSE| API["OpenAI-compatible API<br/>DeepSeek"]
 ```
-blender_copilot/          the Blender extension (this is the package)
-  blender_manifest.toml   extension metadata; declares the network permission
-  __init__.py             register() / unregister()
-  panel.py                the panel, its operators, and its preferences
-  conversation.py         conversation state + the fake reply producer
-  stream.py               the repaint pump
-tests/test_conversation.py   runs on plain CPython, no Blender needed
-tools/undo_probe.py       one-off empirical undo check (run manually, GUI)
-dist/                     built packages (gitignored)
-```
 
-## Target
+Three decisions are load-bearing, and each was argued rather than assumed:
 
-The **installed** Blender at `/Applications/Blender.app` — **5.2.2**, Python
-3.13.13. `blender_version_min` is pinned to `5.2.0` in the manifest.
+- **HTTP runs in a subprocess, not a thread.** Blender's own docs name the long-lived
+  thread plus repeating timer as *unsupported*, and every shipped Blender download does
+  HTTP in a process. Launch-to-ready measured at **0.021 s**, with IPC two orders of
+  magnitude below one timer tick — the safe option was also the cheap one.
+- **A tick does exactly one thing** — drain the reply, *or* execute one tool call, *or*
+  finalize. Not tidiness: the tick that drains a reply carrying `tool_calls` is the tick
+  that queues the rows, so executing in the same callback would run the code before the
+  panel had ever drawn its `running…` row.
+- **The push goes at the end.** Measured both ways — see below.
 
-## Dev loop
+<div align="center">
+<img src="docs/media/tool-row.png" width="417" alt="Mid-turn in the panel: a thinking indicator with an elapsed time, the user's prompt, streamed reasoning, tool rows naming the calls, and output behind an expander.">
+</div>
 
-### Fast loop: symlinked extension directory
+<sub>Mid-turn: the indicator is running, reasoning is still arriving, and the tool row
+names the call. Code never clutters the transcript — the panel shows an identity row and
+mirrors the full text to an addon-owned `Copilot Code` datablock.</sub>
 
-Edit files in place; Blender picks them up on restart. No zip, no reinstall.
+## Run it
 
-```sh
+Blender's Python ships `requests` and `certifi`, so there is nothing to `pip install`.
+Target is a real Blender **5.2.x**; `blender_version_min` is pinned to `5.2.0`.
+
+### Fast loop — symlink the package
+
+```bash
 EXT="$HOME/Library/Application Support/Blender/5.2/extensions/user_default"
 mkdir -p "$EXT"
 ln -sfn "$PWD/blender_copilot" "$EXT/blender_copilot"
 ```
 
-Then enable **Blender Copilot** once in *Preferences → Add-ons*. If
-`user_default` is missing from *Preferences → Get Extensions → Repositories*,
-add a local repository first.
+Restart Blender, then enable **Blender Copilot** in *Preferences → Add-ons*. If
+`user_default` is missing from *Preferences → Get Extensions → Repositories*, add a
+local repository first.
 
-### Real loop: build and install a package
+### Real loop — build and install a package
 
-```sh
-mkdir -p dist                      # the builder does NOT create this itself
+```bash
+mkdir -p dist     # the builder does not create this itself
 /Applications/Blender.app/Contents/MacOS/Blender -c extension build \
     --source-dir ./blender_copilot --output-dir ./dist
 
@@ -63,54 +200,131 @@ mkdir -p dist                      # the builder does NOT create this itself
 
 `-e` enables it on install. Add `validate` before `build` to check the manifest.
 
-### See it
+### Then
 
-Open the 3D Viewport, press **N** for the sidebar, and pick the **Copilot** tab.
-Type into the box, press **Send**, and watch the reply stream in.
+Open the 3D Viewport, press `N`, pick the **Copilot** tab, and type. Two things worth
+knowing first:
 
-### Compare the conversation layouts
+- **The API key** goes in the add-on preferences (masked on screen, plaintext on disk —
+  see [what it does not do](#what-it-does-not-do)), or in `DEEPSEEK_API_KEY` and
+  `DEEPSEEK_API_URL` in the environment that launches Blender. Blender does not read a
+  `.env` for you.
+- **The model name is empty out of the box**, and falls back to `DEEPSEEK_MODEL`, then
+  to `deepseek-flash`. Take a name from the provider's own docs: the legacy
+  `deepseek-v4-flash` is still *accepted* and is silently remapped to a retired model,
+  which is a concrete reason never to hard-code a string from memory.
 
-The panel renders one demo conversation in three candidate layouts, switchable
-live at the bottom of the panel (**Layout (prototype)**):
+## What is measured, not claimed
 
-- **Role boxes** — user turn as a labelled block, assistant turn as one bordered box.
-- **Flat log** — prefixed plain text, no borders.
-- **External transcript** — panel keeps only controls; transcript and code live in
-  the `Copilot Transcript` / `Copilot Code` Text datablocks.
+This is the part of the project worth your time. Every line came from a probe in
+[`tools/`](tools/), and the numbers are the numbers the probe printed — including the
+ones that killed a design.
 
-The decision and the rejected alternatives are on
-[`.scratch/blender-copilot/issues/08-panel-conversation-ux.md`](.scratch/blender-copilot/issues/08-panel-conversation-ux.md).
+| Claim | How it was settled |
+|---|---|
+| **Undo pushes at the end** | One push covers a whole multi-operation turn in a single Ctrl+Z. Pushing *before* the change reverts **further back than the change it was protecting** — so push-at-end survived the test designed to break it. |
+| **An unpushed change is worse than unprotected** | Ctrl+Z reaches *past* it and deletes the object. |
+| **Never push in edit mode** | A push there returns ok, records nothing usable, and the following undo **deletes the object being edited**. So the panel warns in edit mode rather than blocking Send, and refuses the push. |
+| **Operators called from Python never push undo** | Measured — and the reason "just press Ctrl+Z" was never a real gate for arbitrary code. |
+| **A blocking native call cannot be interrupted** | A 1 s alarm still let a `numpy` call run **5.34 s**, so the UI says so instead of promising otherwise. Pure-Python loops *can* be stopped: SIGALRM does it at **1.04×** overhead, where a `sys.monitoring` LINE hook cannot stop `while True: pass` at all. |
+| **The capability guard is hygiene, not containment** | 77 attempts: **49 denied, 2 escaped**, 11 blocked by absence, 15 allowed. Both escapes go through introspection rather than any named path — two lines with no imports get out. |
+| **The manifest's network permission is a declaration, not a sandbox** | Python sockets work from Blender with global online access off and `--offline-mode` set. |
+| **A panel cannot scroll and has no rich text** | `UILayout.textbox()` is the only multi-line input in 5.2.2. Hence newest-turn-first, a bounded transcript, and a companion `Text` datablock for code and full history. |
+| **The provider's wire contract** | A `tool_call` with **no matching `tool` result is rejected, HTTP 400** — so the loop's synthetic `cancelled` results are load-bearing. `function.arguments` arrives as a **JSON string, not an object**. A trailing `system` message is accepted, which is what keeps the cache prefix alive. |
 
-```sh
-# run every layout's draw body with a stub UILayout (no GUI needed)
-/Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
-    --python tools/panel_draw_smoke.py
+<div align="center">
+<img src="docs/media/live-turn.png" width="620" alt="An earlier live turn: a red-and-yellow football built in three tool calls, with an undo receipt reading objects: 0 -&gt; 1.">
+</div>
+
+<sub>A different task, same panel, before this recording harness existed: one prompt,
+three tool calls, a real receipt (`objects: 0 → 1`), and the provider's own token
+counts. Kept here so the five-turn recording is not the only evidence.</sub>
+
+## What it does not do
+
+Published because a project that only lists its wins is not telling you anything. These
+are consequences of ratified decisions, not oversights:
+
+- **Model-authored code auto-runs, unscoped.** No approval gate, no capability
+  restriction. A gate *was* proposed and **rejected** — on the strength of the guard's
+  own probe, which showed it does not contain. A gate whose evidence says it does not
+  gate buys false confidence, so the mechanism was not built. The starting point stands:
+  the model's code runs in your Blender process, and `bpy.app.handlers` or
+  `bpy.app.timers` can register work that outlives the turn.
+- **The API key is plaintext** in `userpref.blend`, masked on screen only. `SKIP_SAVE`
+  was verified *not* to keep it out of the file. Use the environment variable if you
+  would rather it never land on disk.
+- **Undo covers local `bpy.data` only** — not files, not subprocesses, not network, not
+  preferences, not Python state.
+- **Stop cannot reach a call that has not returned.** It kills the worker and the next
+  turn, not the `numpy` call already inside the interpreter.
+- **`blender -b` is out of scope by construction.** Timers and modal operators do not
+  fire headless, and the loop is built on timers.
+- **Turns are slow when the model thinks.** 21 minutes for the five above; the model
+  spent most of it working, and thinking is on by default at the provider and billed as
+  completion tokens. The byte budget and `Stop` exist for exactly that.
+
+## Where the plan lives
+
+The work is charted as a wayfinder map: **18 tickets, all resolved**, in
+[`.scratch/blender-copilot/`](.scratch/blender-copilot/map.md) — each decision in exactly
+one ticket, with the alternatives and their costs, plus a
+[ratification record](docs/ratification.md) of the one point where a human ruled
+(**15 accepted, 1 rejected** — the approval gate).
+
+Read the map if you want to disagree with a decision: it states what was rejected and
+why, which is the part that is usually missing.
+
+## Project layout
+
+```
+blender_copilot/            the extension — 16 modules, ~9,600 lines
+  panel.py                  the panel, its operators, its preferences
+  conversation.py           transcript state, and the turn's state machine
+  execution.py              the three tools: validation, caps, truncation
+  transport.py  _worker.py  the subprocess, ndjson framing, SSE reassembly
+  budget.py  context.py     what the next request costs, and the projection into it
+  undo.py  undo_blender.py  the push discipline, and the receipt
+  store.py  scope.py        history outside the .blend, scoped per file path
+tests/                      4 suites, plain CPython, no Blender needed
+tools/                      the probes, and the recording harness
+docs/media/                 the pictures in this README
+docs/ratification.md        the human's rulings
 ```
 
-## Verified / not verified
+### Verify it yourself
 
-Verified on 2026-09-25 against Blender 5.2.2:
+```bash
+# four suites, plain CPython
+for t in tests/test_*.py; do python3 "$t" || echo "FAILED $t"; done
 
-- manifest parses (`extension validate`)
-- all four classes register and unregister without error
-- 42 unit checks on the conversation and wrapping logic pass on plain CPython
-- the package builds, installs, and enables as `bl_ext.user_default.blender_copilot`
-- preferences bind correctly, so the textbox has an RNA string to attach to
-- the symlinked extension directory is discovered and enables
-- `tools/capability_probe.py` runs headlessly and reproduces its own numbers
-  (77 attempts: 49 denied, 2 escaped, 11 blocked, 15 allowed), so the capability
-  boundary in ticket 13 is a measurement rather than a claim
+# the panel's draw body, headless, with a stub UILayout
+/Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
+    --python tools/panel_draw_smoke.py
 
-**Not verified, because it needs a human looking at a GUI:** that the panel
-draws as intended, that the textbox renders and writes back, that the streamed
-repaint is smooth rather than janky, that `Show code` splits an area correctly,
-and the undo behaviour in `tools/undo_probe.py`.
+# record the five turns yourself (spends a few cents), then compose the media
+set -a; . ./.env; set +a
+DEMO_LIVE=1 DEMO_UI_SCALE=1.0 python3 tools/bounded_run.py 3600 -- \
+    /Applications/Blender.app/Contents/MacOS/Blender \
+    --window-geometry 20 20 1790 960 --python tools/demo_capture.py
+python3 tools/demo_media.py
 
-## Two things that shape the design
+# or rebuild the same pictures with no key and no network
+python3 tools/bounded_run.py 240 -- \
+    /Applications/Blender.app/Contents/MacOS/Blender \
+    --window-geometry 20 20 1790 960 --python tools/demo_capture.py
+```
 
-- **A panel cannot scroll, and has no rich text.** `UILayout` offers neither, so
-  the transcript truncates older lines and code renders as plain text. Long
-  history and code display may need a companion Text Editor surface.
-- **The repaint must be earned.** The timer only tags a redraw when the text
-  actually changed, and unregisters itself when the stream ends — an idle panel
-  costs nothing.
+Blender exits **0 even when a `--python` script raises**, so every Blender-side check
+prints a verdict token (`SMOKE OK`, `DEMO OK`, `MEDIA OK`) and the caller greps for the
+token. Gate on the token, never on the exit status — that is measured, not assumed, and
+it is the rule that keeps the probes honest.
+
+<div align="center">
+<sub>
+
+Built by **XEonAX** · `bl_ext.user_default.blender_copilot` · **0.0.1**
+Licence: GPL-3.0-or-later, as the manifest declares.
+
+</sub>
+</div>

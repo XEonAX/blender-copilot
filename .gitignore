@@ -5,3 +5,9 @@ dist/
 logs/
 .DS_Store
 .env
+
+# The demo video is a build artefact. The published copy is a GitHub asset URL
+# in README.md, so the file itself is not needed here; tools/demo_media.py can
+# remake it from logs/demo/raw/ with `python3 tools/demo_media.py`. The GIF and
+# stills in the same folder ARE referenced by README.md and must stay tracked.
+docs/media/*.mp4
