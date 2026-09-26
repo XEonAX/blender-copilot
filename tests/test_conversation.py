@@ -779,4 +779,167 @@ check(
 )
 check("and the base prompt is byte-identical", shape_sender.sent[0][0]["content"] == "BASE")
 
+# ------------------------------------------------------------------ persistence
+#
+# The store keeps **one** schema - the provider's - so reopening a file re-derives
+# the display rows from the wire history instead of reading a second, lossier one.
+# These checks are about that derivation, and about what happens to a turn that is
+# still in flight when the file underneath it changes.
+print("\n-- what survives a restart --")
+
+RESTORED_TURN = [
+    {"role": "user", "content": "make it taller"},
+    {
+        "role": "assistant",
+        "content": "Scaling it now.",
+        "tool_calls": [
+            {
+                "id": "p1",
+                "type": "function",
+                "function": {
+                    "name": "run_blender_python",
+                    # A JSON *string*, as the provider sends it (measured, ticket 16).
+                    "arguments": json.dumps({"code": "obj.scale.z = 2", "purpose": "Scale on Z"}),
+                },
+            }
+        ],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "p1",
+        "content": json.dumps(
+            {"ok": True, "tool": "run_blender_python", "summary": "done", "output": "z scale 2.00"}
+        ),
+    },
+    {"role": "assistant", "content": "Done - the cube is twice as tall."},
+]
+
+rebuilt = conversation.messages_from_history(RESTORED_TURN)
+check("the ask comes back", rebuilt[0].role == "user" and rebuilt[0].text == "make it taller")
+check("the assistant's prose comes back", rebuilt[1].text == "Scaling it now.")
+check(
+    "the code row comes back with its identity",
+    rebuilt[2].kind == conversation.KIND_CODE and rebuilt[2].purpose == "Scale on Z",
+)
+check("and with the code itself, for `Show code`", rebuilt[2].detail == "obj.scale.z = 2")
+check(
+    "the tool row comes back named",
+    rebuilt[3].kind == conversation.KIND_TOOL and rebuilt[3].purpose == "Scale on Z",
+)
+check("with its status read from the envelope", rebuilt[3].status == conversation.STATUS_OK)
+check(
+    "its output behind the expander, indented to read",
+    '"output"' in rebuilt[3].detail and "\n" in rebuilt[3].detail,
+)
+check("and the closing prose", rebuilt[4].text == "Done - the cube is twice as tall.")
+check("no row is invented", len(rebuilt) == 5)
+check("every restored call row names the call it reports", rebuilt[3].call_id == "p1")
+check(
+    "nothing restored is left mid-stream",
+    all(message.status != conversation.STATUS_RUNNING for message in rebuilt),
+)
+
+RESTORED_FAILURE = [
+    {"role": "user", "content": "break it"},
+    {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "p2",
+                "function": {
+                    "name": "run_blender_python",
+                    "arguments": json.dumps({"code": "raise", "purpose": "Break it"}),
+                },
+            }
+        ],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "p2",
+        "content": json.dumps({"ok": False, "error": {"kind": "runtime_error", "message": "boom"}}),
+    },
+]
+failed_rows = conversation.messages_from_history(RESTORED_FAILURE)
+check("a failed call comes back as a failure", failed_rows[-1].status == conversation.STATUS_ERROR)
+check(
+    "its error text is behind the expander, not in the row",
+    "boom" in failed_rows[-1].detail and "boom" not in failed_rows[-1].text,
+)
+check(
+    "an assistant message of `None` content is not drawn as an empty reply",
+    len(failed_rows) == 3 and not any(row.kind == conversation.KIND_ASSISTANT for row in failed_rows),
+)
+
+ORPHANED_CALL = [
+    {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "p3", "function": {"name": "t", "arguments": "{}"}}],
+    }
+]
+orphan_rows = conversation.messages_from_history(ORPHANED_CALL)
+check(
+    "a stored call with no stored result never looks like it is still running",
+    orphan_rows[0].status == conversation.STATUS_ERROR,
+)
+check("and says the result is missing", "no result" in orphan_rows[0].detail.lower())
+
+restored = conversation.Conversation()
+restored.begin_turn("something else entirely")
+restored.apply_event({"ev": "delta", "text": "nope"})
+restored.apply_event({"ev": "done", "finish_reason": "stop"})
+restored.restore(RESTORED_TURN)
+check("restore puts the stored history on the wire transcript", restored.history == RESTORED_TURN)
+check("and on the display one, replacing what was there", restored.messages[0].text == "make it taller")
+check("with nothing in flight", not restored.streaming and restored.phase == conversation.PHASE_IDLE)
+check("and the conversation can be sent again", restored.begin_turn("carry on") is None and restored.streaming)
+check("snapshot copies, so a caller cannot reach back into the transcript", restored.snapshot()[0] is not restored.history[0])
+check("while carrying the same messages", restored.snapshot()[:2] == RESTORED_TURN[:2])
+restored.cancel()
+
+# A file switch mid-turn. Nothing of the abandoned turn may reach the new
+# conversation, and the old one must stay sendable for when the user returns.
+print("\n-- switching files mid-turn --")
+
+switching = conversation.Conversation()
+switching_sender = FakeSender()
+wire(switching, switching_sender)
+switching.begin_turn("do two things")
+deliver(switching, calls=[wire_call("q1", "One", "pass"), wire_call("q2", "Two", "pass")])
+switching.pump()
+started_in = switching.generation
+check("a turn is in the generation it started in", started_in == switching.turn_generation)
+check("closing the file abandons it", switching.abandon() is True)
+check("the turn is over", not switching.streaming and switching.phase == conversation.PHASE_IDLE)
+check("the queued call is answered rather than orphaned", unanswered(switching.history) == [])
+check(
+    "and its answer names the reason it never ran",
+    json.loads(switching.history[-1]["content"])["error"]["kind"] == "scope_changed",
+)
+check("the generation moved on", switching.generation > started_in)
+check("a late chunk for the old turn is dropped", switching.apply_event({"ev": "delta", "text": "late"}) is False)
+check(
+    "and so is a fatal one, which would otherwise blame the new file",
+    switching.apply_event(
+        {"ev": "startup_failed", "fatal": True, "message": "The worker exited"}
+    )
+    is False
+    and switching.transport_error is None,
+)
+check("nothing of it is on screen", "late" not in "".join(m.text for m in switching.messages))
+check("the next turn makes the session live again", switching.begin_turn("fresh") is None)
+check("and re-syncs the generation", switching.generation == switching.turn_generation)
+check("so its events land", switching.apply_event({"ev": "delta", "text": "hello"}) is True)
+switching.cancel()
+
+idle = conversation.Conversation()
+check("abandoning an idle session is not an event", idle.abandon() is False)
+check(
+    "but it still fences the generation, so a stray fatal event cannot invent a banner",
+    idle.apply_event({"ev": "startup_failed", "fatal": True, "message": "boom"}) is False
+    and idle.transport_error is None,
+)
+
+
 print("\nall checks passed")

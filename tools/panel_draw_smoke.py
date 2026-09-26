@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 import bpy  # noqa: E402
 import blender_copilot as bc  # noqa: E402
-from blender_copilot import conversation, panel  # noqa: E402
+from blender_copilot import conversation, panel, scope  # noqa: E402
 
 
 class StubLayout:
@@ -227,6 +227,67 @@ def main() -> None:
         instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
         assert ("operator", "blender_copilot.send", "Send") in log, log
         print("ok   Stop replaces Send only while a turn is in flight")
+
+        # Where the conversation is filed, and the two actions on the record
+        # itself (build ticket 04). The scope on screen in *this* run is the
+        # degraded one, and that is the case worth pinning: the add-on is imported
+        # as a plain module here, so `extension_path_user` raises - measured, it
+        # requires a package name that names an extension - and there is nowhere to
+        # write. A panel that cannot say so is the failure this file exists to
+        # catch.
+        assert not scope.store_.available, scope.store_.directory()
+        print(f"ok   no history directory in this run, and the scope says so: {scope.header()!r}")
+        assert scope.header() == scope.store.SESSION_ONLY_LABEL, scope.header()
+        assert "nothing is written" in scope.note(), scope.note()
+        # And the other degradation - a real file path, nowhere to file it - which
+        # is the case the ratified decision spelled out: degrade to in-memory and
+        # say so, rather than failing or pretending.
+        scope.current.blend_path = "/tmp/scene.blend"
+        assert scope.header() == scope.store.NO_STORE_LABEL, scope.header()
+        assert "this session only" in scope.note(), scope.note()
+        scope.current.blend_path = ""
+        print("ok   a file with nowhere to save says `session only` too")
+
+        log = []
+        instance._draw_header(StubLayout(log), context)
+        header_labels = [entry[1] for entry in log if entry[0] == "label"]
+        assert scope.header() in header_labels, log
+        print("ok   the header names the scope, so `session only` is visible before it matters")
+
+        log = []
+        instance._draw_history(StubLayout(log), panel.wrap_budget(context))
+        assert (
+            "operator",
+            "blender_copilot.reveal_history",
+            "Show folder",
+        ) in log, log
+        assert (
+            "operator",
+            "blender_copilot.delete_history",
+            "Delete all",
+        ) in log, log
+        print("ok   the history box offers the folder and the delete")
+
+        # A pruned history says so. `meta.retention` is what the store writes, so
+        # this is the panel half of "a store that prunes silently is a trust bug".
+        kept = dict(scope.current.meta)
+        scope.current.meta = {"retention": {"turns_dropped": 4}}
+        log = []
+        instance._draw_history(StubLayout(log), panel.wrap_budget(context))
+        drawn = " ".join(entry[1] for entry in log if entry[0] == "label")
+        assert "4 earlier turns" in drawn, log
+        assert "history cap" in drawn, log
+        print("ok   a pruned store admits it on screen, with the count")
+        scope.current.meta = kept
+
+        # Deleting everything asks first, and the ask is not something this file
+        # can perform - it needs a window (the GUI probe drives it). What is
+        # checked here is that the operator *has* an invoke, because an operator
+        # without one is called straight through to `execute`, which would delete
+        # everything on a mistimed Enter.
+        assert "invoke" in vars(panel.BLENDER_COPILOT_OT_delete_history), "no confirmation"
+        assert "cannot be undone" in panel.BLENDER_COPILOT_OT_delete_history.bl_description
+        print("ok   delete-all goes through a confirmation, not straight to execute")
 
         print("\nall draw bodies ran")
     finally:

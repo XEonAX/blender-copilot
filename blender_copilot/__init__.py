@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, panel, stream, transport
+from . import conversation, panel, scope, stream, transport
 
 _classes = (
     panel.BlenderCopilotPreferences,
@@ -28,6 +28,8 @@ _classes = (
     panel.BLENDER_COPILOT_OT_open_transcript,
     panel.BLENDER_COPILOT_OT_enable_global_undo,
     panel.BLENDER_COPILOT_OT_retry_transport,
+    panel.BLENDER_COPILOT_OT_reveal_history,
+    panel.BLENDER_COPILOT_OT_delete_history,
     panel.BLENDER_COPILOT_PT_panel,
 )
 
@@ -35,9 +37,15 @@ _classes = (
 def register() -> None:
     for cls in _classes:
         bpy.utils.register_class(cls)
+    # After the classes, because the handlers restore a conversation into the
+    # session the panel draws from. The handlers are `persistent` (see
+    # `scope.py`): without the decorator a `load_post` one is removed before it
+    # can run on the first file load, and the whole scope switch would never fire.
+    scope.start()
 
 
 def unregister() -> None:
+    scope.stop()
     stream.stop()
     # The child's stdin read loop ends on EOF, so an idle orphan is impossible
     # (ticket 11) - but closing it is still ours to do, and doing it politely

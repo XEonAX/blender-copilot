@@ -228,6 +228,114 @@ def _synthetic_result(tool: str, kind: str, message: str) -> dict:
     }
 
 
+def _envelope(content) -> dict | None:
+    """A tool result's envelope, when it parses. On the wire it is JSON text."""
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str) or not content.strip():
+        return None
+    try:
+        value = json.loads(content)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _row_detail(content) -> str:
+    """The expandable body of a restored tool row: pretty JSON, or the raw text."""
+    envelope = _envelope(content)
+    if envelope is None:
+        return redact(content) if isinstance(content, str) else ""
+    return json.dumps(envelope, ensure_ascii=False, indent=2)
+
+
+def messages_from_history(history: list[dict]) -> list[Message]:
+    """Rebuild the display transcript from the stored wire history.
+
+    The store keeps **one** schema - the provider's - so a reopened file re-derives
+    its rows instead of carrying a second, lossier one (*Where chat history lives*
+    §3). What that costs, said plainly rather than hidden: a block that only ever
+    explained something *live* - the transport banner, a cap's notice, the
+    `[stopped]` marker - has no wire form and does not come back. What the model
+    saw and what it answered does.
+
+    The call/result pairing is re-made here, by id, and nowhere else: a `tool`
+    result is drawn as the row of the call that produced it, so a restored
+    transcript shows the same shape a live one did - code row, then tool row.
+    """
+    results: dict = {}
+    for message in history:
+        if message.get("role") == "tool":
+            call_id = message.get("tool_call_id")
+            if call_id:
+                results[call_id] = message
+
+    rows: list[Message] = []
+    for message in history:
+        role = message.get("role")
+        if role == "user":
+            text = redact(message.get("content")) if isinstance(message.get("content"), str) else ""
+            if text:
+                rows.append(Message("user", text))
+            continue
+        if role != "assistant":
+            # A `tool` result is drawn with its call, and a `system` message is
+            # the base prompt or the live summary - neither is part of the
+            # conversation the user had.
+            continue
+        text = redact(message.get("content")) if isinstance(message.get("content"), str) else ""
+        if text:
+            rows.append(Message("assistant", text))
+        for call in message.get("tool_calls") or []:
+            arguments = _plain_arguments(call)
+            function = call.get("function") or {}
+            purpose = ""
+            code = None
+            if isinstance(arguments, dict):
+                purpose = str(arguments.get("purpose") or "").strip()
+                code = arguments.get("code")
+            label = purpose or function.get("name") or "tool call"
+            call_id = call.get("id") or ""
+            if isinstance(code, str) and code.strip():
+                rows.append(
+                    Message(
+                        "assistant",
+                        kind=KIND_CODE,
+                        purpose=label,
+                        detail=code,
+                        call_id=call_id,
+                    )
+                )
+            result = results.get(call_id)
+            if result is None:
+                # An unanswered call is an error, never `running`: a restored row
+                # stuck at running would make the panel claim a turn is in flight
+                # for the rest of the session.
+                rows.append(
+                    Message(
+                        "assistant",
+                        kind=KIND_TOOL,
+                        status=STATUS_ERROR,
+                        purpose=label,
+                        call_id=call_id,
+                        detail='{"ok": false, "note": "No result was recorded for this call."}',
+                    )
+                )
+                continue
+            envelope = _envelope(result.get("content"))
+            rows.append(
+                Message(
+                    "assistant",
+                    kind=KIND_TOOL,
+                    status=STATUS_OK if envelope and envelope.get("ok") else STATUS_ERROR,
+                    purpose=label,
+                    detail=_row_detail(result.get("content")),
+                    call_id=call_id,
+                )
+            )
+    return rows
+
+
 class Conversation:
     def __init__(self) -> None:
         self.messages: list[Message] = []
@@ -238,6 +346,13 @@ class Conversation:
         # The wire transcript. Never the display transcript: see the module
         # docstring for why they are two lists and not one.
         self.history: list[dict] = []
+        # The scope generation. Bumped whenever this conversation stops being the
+        # one an in-flight turn belonged to - a file was opened, or the session
+        # was pointed at a different conversation - and compared against
+        # `turn_generation` on every event, so the old worker's late chunks are
+        # dropped instead of landing in a file they know nothing about.
+        self.generation = 0
+        self.turn_generation = 0
         # The loop (ticket 09 §0). `phase` is where in the turn we are; the rest is
         # the ledger the caps are computed from and the queue the ticks drain.
         self.phase = PHASE_IDLE
@@ -383,6 +498,7 @@ class Conversation:
         self.messages.append(Message("assistant", ""))
         self.history.append({"role": "user", "content": prompt})
         self.streaming = True
+        self.turn_generation = self.generation
         self.phase = PHASE_REQUEST
         self.busy_kind = BUSY_STREAM
         self.reasoning_chars = 0
@@ -527,7 +643,15 @@ class Conversation:
         Every branch returns whether anything the user can see has changed,
         because the drain timer repaints on exactly that signal and never on a
         tick count.
+
+        The generation fence comes first. An event that arrives after the file
+        underneath the turn changed belongs to a scene this conversation is not
+        looking at - and the fatal ones are the reason the fence exists: without
+        it, the previous file's dying worker would put "Send is unavailable" on a
+        freshly opened file that has nothing wrong with it.
         """
+        if self.generation != self.turn_generation:
+            return False
         kind = event.get("ev")
         if kind == "delta":
             return self.append_text(event.get("text") or "")
@@ -820,6 +944,51 @@ class Conversation:
         self.last_receipt = None
         self.reasoning_chars = 0
         self._reasoning_notch = 0
+
+    # -- leaving and re-entering a conversation ------------------------------
+    def abandon(self) -> bool:
+        """Let go of the in-flight turn because the file it belonged to has gone.
+        True when there was one to let go of.
+
+        Nothing is written into the arriving conversation - no "you switched
+        files" line, because the store *is* the provider's wire format and does not
+        take UI-only lines. What the *old* conversation keeps is a truthful ending:
+        its queued calls are answered with `scope_changed`, so the history left
+        behind is still sendable when the user comes back to that file.
+
+        The generation bump is the other half, and `turn_generation` deliberately
+        stays where the abandoned turn started it - the next `begin_turn` re-syncs
+        it - so every late event is dropped rather than applied.
+        """
+        had_turn = self.streaming
+        if had_turn:
+            self._flush_pending("scope_changed", "The file changed before this call ran.")
+            self._drop_empty_reply()
+            self._end_turn()
+        self.generation += 1
+        return had_turn
+
+    def snapshot(self) -> list[dict]:
+        """The wire history, copied, for the store to write."""
+        return [dict(message) for message in self.history]
+
+    def restore(self, history: list[dict]) -> None:
+        """Adopt a stored conversation: the wire history and the rows it implies.
+
+        Both transcripts are replaced together, because a display transcript that
+        disagrees with the wire one is the bug the two-list split exists to
+        prevent. `abandon`'s discipline applies too - the generation moves - so an
+        event from whatever was running before this conversation was opened cannot
+        land in it.
+        """
+        self._end_turn()
+        self.history[:] = [dict(message) for message in history]
+        self.messages[:] = messages_from_history(self.history)
+        self.last_receipt = None
+        self.reasoning_chars = 0
+        self._reasoning_notch = 0
+        self._rows = {}
+        self.generation += 1
 
 
 session = Conversation()

@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, prompt, toolbox, transport
+from . import conversation, prompt, scope, toolbox, transport
 
 # 50 ms. Ticket 11 measured launch-to-ready at 0.021 s and a JSON round trip at
 # 0.02 ms, so this is two orders of magnitude above the IPC it is watching -
@@ -95,6 +95,7 @@ def _tick():
     row. One step per tick is what makes that row real rather than theoretical.
     """
     changed = False
+    was_streaming = conversation.session.streaming
     events = transport.worker.tick()
     if events:
         for event in events:
@@ -103,6 +104,13 @@ def _tick():
     elif conversation.session.pump():
         # Only when nothing was drained: a tool call blocks the main thread for
         # its whole duration, so it gets a tick to itself.
+        changed = True
+
+    # A turn that just ended is the store's write point. The conversation only
+    # changes during a turn, so this is the one moment a file write can hold
+    # anything new - and `persist()` itself writes nothing when it would change
+    # nothing, so the check costs a list comparison on a tick that did nothing.
+    if was_streaming and not conversation.session.streaming and scope.persist():
         changed = True
 
     if changed:

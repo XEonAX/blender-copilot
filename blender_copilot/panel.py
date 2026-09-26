@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, prompt, stream, toolbox, transport
+from . import conversation, prompt, scope, stream, toolbox, transport
 
 CATEGORY = "Copilot"
 NON_HOST_AREAS = {"TEXT_EDITOR", "PREFERENCES", "STATUSBAR", "TOPBAR"}
@@ -45,6 +45,13 @@ def write_text(name: str, body: str):
     text = bpy.data.texts.get(name)
     if text is None:
         text = bpy.data.texts.new(name)
+    # `texts.new()` defaults `use_fake_user` to True, which *is* what makes a Text
+    # datablock survive into the file it is saved in - measured, and the reason the
+    # conversation itself is not stored this way. These mirrors are a rendering
+    # surface, not a record, so they get no fake user; `scope._on_save_pre` removes
+    # them outright on the way into a save, because a Text Editor displaying one
+    # holds a real user and would keep it alive regardless.
+    text.use_fake_user = False
     text.clear()
     text.write(body)
     return text
@@ -237,14 +244,63 @@ class BLENDER_COPILOT_OT_retry_transport(bpy.types.Operator):
 class BLENDER_COPILOT_OT_clear(bpy.types.Operator):
     bl_idname = "blender_copilot.clear"
     bl_label = "Clear"
-    bl_description = "Discard the conversation"
+    bl_description = "End this conversation and start a new one; history is kept"
     bl_options = {"INTERNAL"}
 
     def execute(self, context):
-        conversation.session.clear()
+        # `scope.clear` finalizes rather than deletes: the stored conversation is
+        # written out and a fresh one is started in the same scope. Deleting is
+        # the separate, confirmed action below.
+        scope.clear()
         stream.stop()
         mirror_transcript()
         stream.tag_view3d_redraw()
+        return {"FINISHED"}
+
+
+class BLENDER_COPILOT_OT_reveal_history(bpy.types.Operator):
+    bl_idname = "blender_copilot.reveal_history"
+    bl_label = "Show history folder"
+    bl_description = "Open the folder that holds the stored conversations"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        if not scope.reveal():
+            self.report({"ERROR"}, "There is no history folder to show")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class BLENDER_COPILOT_OT_delete_history(bpy.types.Operator):
+    bl_idname = "blender_copilot.delete_history"
+    bl_label = "Delete all chat history"
+    bl_description = (
+        "Delete every stored conversation. This cannot be undone - the files are "
+        "removed from disk"
+    )
+    bl_options = {"INTERNAL"}
+
+    def invoke(self, context, event):
+        # The 5.2.2 idiom (bundled use: `5.2/scripts/startup/bl_operators/
+        # presets.py`). Deleting everything is the one action here that destroys
+        # something the user cannot get back, so it asks - and the prompt says what
+        # goes, not just "are you sure".
+        return context.window_manager.invoke_confirm(
+            self,
+            event,
+            title="Delete all chat history?",
+            message="Every stored conversation is removed from disk. This cannot be undone.",
+            confirm_text="Delete",
+            icon="WARNING",
+        )
+
+    def execute(self, context):
+        removed = scope.delete_all()
+        stream.tag_view3d_redraw()
+        if not removed:
+            self.report({"INFO"}, "There was no stored history to delete")
+            return {"FINISHED"}
+        self.report({"INFO"}, f"Deleted {removed} stored conversation file(s)")
         return {"FINISHED"}
 
 
@@ -392,6 +448,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         # standing above the input, which is what the visual pass reversed.
         self._draw_receipt(layout, budget)
         self._draw_coverage(layout, budget)
+        self._draw_history(layout, budget)
         self._draw_variant_picker(layout, settings)
 
     # -- chrome --------------------------------------------------------------
@@ -399,6 +456,15 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         row = layout.row(align=True)
         row.label(text="prototype", icon="INFO")
         row.label(text=conversation.session.status)
+
+        # Which conversation this is, in the header because it is a property of
+        # the whole session rather than of the transcript below - and because
+        # "unsaved - session only" is the one thing a user must be told *before*
+        # they rely on history being kept. It is short deliberately: Blender
+        # middle-clips a label that does not fit, and `store.scope_label`
+        # shortens a long basename rather than letting the row do it.
+        scope_row = layout.row(align=True)
+        scope_row.label(text=scope.header(), icon="FILE_BLEND")
 
         if not context.preferences.edit.use_global_undo:
             banner = layout.box()
@@ -507,6 +573,28 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         for line in conversation.COVERAGE_LINES:
             for chunk in conversation.wrap(line, budget):
                 box.label(text=chunk)
+
+    def _draw_history(self, layout, budget):
+        """Where the conversation is filed, and the two actions that touch the
+        record itself.
+
+        The scope name is repeated from the header because this is where the
+        destructive button is, and "what am I about to delete" should not require
+        scrolling back to the top of an unbounded transcript. The note is either a
+        retention admission - the cap pruned turns, and a store that prunes
+        silently is a trust bug - or the session-only warning, and it wraps because
+        both are sentences rather than labels.
+        """
+        box = layout.box()
+        heading = box.row(align=True)
+        heading.label(text=scope.header(), icon="FILE_BLEND")
+        note = scope.note()
+        if note:
+            for line in conversation.wrap(note, budget):
+                box.label(text=line)
+        row = box.row(align=True)
+        row.operator("blender_copilot.reveal_history", text="Show folder", icon="FILE_FOLDER")
+        row.operator("blender_copilot.delete_history", text="Delete all", icon="TRASH")
 
     def _draw_variant_picker(self, layout, settings):
         box = layout.box()
