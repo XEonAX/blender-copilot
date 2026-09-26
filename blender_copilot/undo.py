@@ -33,9 +33,15 @@ sub-object data. A scale on an existing cube is invisible to it, and the receipt
 therefore says *that the scene's data changed*, never "exactly this property
 changed". A property-level RNA crawl was rejected as unbounded on a large scene.
 
-`pause_reason` is §4: with Global Undo off - and, as the measurement confirmed,
-in edit mode - auto-run is **paused**, not warned about, because there is no
-recovery at all for the one class the addon can recover.
+`pause_reason` is §4, amended by the owner on 2026-09-26: with Global Undo off
+auto-run is **paused** - there is no recovery at all for the one class the addon
+can recover, and the fix is one click in the banner. In edit mode it is **not**
+paused any more. The measurement behind the old pause still holds (`undo_push`
+there records nothing usable and the undo after it deletes the object), so the
+push is still refused - but refusing to *start* meant the agent was unusable in
+the mode where modelling happens, blocking even a question. The owner's decision
+was that a user may take the risk **knowingly**: `PAUSE_LINES` states it in the
+panel before they send, and `blocking_reason` is what the panel and `Send` gate on.
 """
 
 from __future__ import annotations
@@ -84,9 +90,12 @@ PAUSE_LINES = {
     ),
     PAUSE_EDIT_MODE: (
         "Blender is in edit mode.",
-        "An undo step here records nothing usable,",
-        "and the undo after one deletes the object.",
-        "Auto-run is paused. Return to Object mode to continue.",
+        "No undo step is recorded for this turn: in edit mode",
+        "a step records nothing usable, and the undo after",
+        "one deletes the object being edited.",
+        "Ctrl+Z will then undo this turn together with your own",
+        "last change, rather than this turn alone.",
+        "Press Tab first if you want this turn to have its own step.",
     ),
 }
 
@@ -122,6 +131,13 @@ REFUSAL_LINES = {
         "Blender was in edit mode when the turn ended.",
         "No undo step was recorded: in edit mode a step records nothing usable,",
         "and the undo after one deletes the object.",
+        # MEASURED 2026-09-26, `tools/undo_step_probe.py` case 10, with a step of the
+        # user's own pushed between the baseline and the turn: scale 1.0 at the
+        # baseline, 2.0 in the user's own step, 3.0 set by the turn, and one Ctrl+Z in
+        # edit mode landed on 1.0 - the turn AND the user's own change. Nothing was
+        # deleted (the object list was unchanged), which is the part the push refusal
+        # buys, so the sentence names what is actually lost rather than the old guess.
+        "Ctrl+Z undoes this turn together with your own last change.",
     ),
     REFUSED_GLOBAL_UNDO: (
         "Global Undo is off, so nothing this turn ran can be undone.",
@@ -357,7 +373,7 @@ def receipt(
 # ---------------------------------------------------------------------------
 
 def pause_reason(global_undo: bool, mode: str) -> str | None:
-    """Why auto-run must not start, or `None` (ticket 12 §4).
+    """What to warn the user about, or `None` (ticket 12 §4, amended 2026-09-26).
 
     Two inputs, both readable from `bpy.context` and neither needing a probe:
     the preference (measured valid: with it off, `bpy.ops.ed.undo()` raises
@@ -372,12 +388,27 @@ def pause_reason(global_undo: bool, mode: str) -> str | None:
     the addon reads the preference instead of hoping.
 
     Edit mode is the other input, and it is stricter than §4 could know: the push
-    *succeeds* there and the next undo deletes the object being edited, so the
-    pause is not merely "no recovery" but "the recovery offered would destroy
-    work".
+    *succeeds* there and the next undo deletes the object being edited. That is why
+    the push is still refused in edit mode - but it is a warning rather than a gate,
+    because the owner decided on 2026-09-26 that a user may take that risk knowingly,
+    having read what it costs. `blocking_reason` is the gate.
     """
     if not global_undo:
         return PAUSE_GLOBAL_UNDO
     if str(mode or "").startswith("EDIT_"):
         return PAUSE_EDIT_MODE
     return None
+
+
+def blocking_reason(global_undo: bool, mode: str) -> str | None:
+    """Why `Send` must refuse, or `None` - the gate, as opposed to the warning.
+
+    Global Undo off is the whole of it: the preference is the one input that makes
+    *every* turn unrecoverable, and the banner offers its one-click fix. Edit mode is
+    deliberately absent (owner, 2026-09-26): the turn runs, the push is refused there
+    by `close_turn`, and `PAUSE_LINES` tells the user what they are accepting.
+
+    A separate function rather than a flag on `pause_reason`, so a caller cannot
+    accidentally treat "warn about this" as "stop".
+    """
+    return PAUSE_GLOBAL_UNDO if not global_undo else None

@@ -1757,25 +1757,63 @@ check(
 )
 check("and it is still not undoable", failed["undoable"] is False)
 
-# -- when auto-run must pause ---------------------------------------------
-check("Global Undo off pauses auto-run", undo.pause_reason(False, "OBJECT") == undo.PAUSE_GLOBAL_UNDO)
-check("edit mode pauses it too", undo.pause_reason(True, "EDIT_MESH") == undo.PAUSE_EDIT_MODE)
-check("so does any other edit mode", undo.pause_reason(True, "EDIT_CURVE") == undo.PAUSE_EDIT_MODE)
+# -- what the panel warns about, and what it refuses (owner, 2026-09-26) ----
+#
+# Two rules, and the whole point of the split is that they are NOT the same. The owner
+# asked why Send was disabled while they edited a cube and chose the warning over the
+# block ("let the user take the risk knowingly"), so `blocking_reason` - the gate - must
+# stay strictly narrower than `pause_reason` - the warning. If a future change folds them
+# back together, these are the checks that fail.
+check("Global Undo off blocks a send", undo.blocking_reason(False, "OBJECT") == undo.PAUSE_GLOBAL_UNDO)
 check(
-    "sculpt mode does not: memfile undo is compatible there (ed_undo.cc:588)",
+    "and blocks it in edit mode as well",
+    undo.blocking_reason(False, "EDIT_MESH") == undo.PAUSE_GLOBAL_UNDO,
+)
+check("edit mode does NOT block a send", undo.blocking_reason(True, "EDIT_MESH") is None)
+check("nor any other edit mode", undo.blocking_reason(True, "EDIT_CURVE") is None)
+check("object mode with Global Undo on blocks nothing", undo.blocking_reason(True, "OBJECT") is None)
+check(
+    "the gate is never wider than the warning",
+    all(
+        undo.blocking_reason(g, m) in (None, undo.pause_reason(g, m))
+        for g in (True, False)
+        for m in ("OBJECT", "EDIT_MESH", "EDIT_CURVE", "SCULPT", "")
+    ),
+)
+
+# -- what the panel warns about -------------------------------------------
+check("Global Undo off is a warning", undo.pause_reason(False, "OBJECT") == undo.PAUSE_GLOBAL_UNDO)
+check("edit mode is a warning too", undo.pause_reason(True, "EDIT_MESH") == undo.PAUSE_EDIT_MODE)
+check("so is any other edit mode", undo.pause_reason(True, "EDIT_CURVE") == undo.PAUSE_EDIT_MODE)
+check(
+    "sculpt mode is not: memfile undo is compatible there (ed_undo.cc:588)",
     undo.pause_reason(True, "SCULPT") is None,
 )
-check("object mode with Global Undo on runs", undo.pause_reason(True, "OBJECT") is None)
+check("object mode with Global Undo on warns about nothing", undo.pause_reason(True, "OBJECT") is None)
 check(
-    "the two pauses are distinguishable on screen",
+    "the two warnings are distinguishable on screen",
     undo.PAUSE_LINES[undo.PAUSE_GLOBAL_UNDO] != undo.PAUSE_LINES[undo.PAUSE_EDIT_MODE],
 )
 check(
-    "and each says auto-run is paused",
-    all(
-        any("paused" in line for line in undo.PAUSE_LINES[code])
-        for code in (undo.PAUSE_GLOBAL_UNDO, undo.PAUSE_EDIT_MODE)
-    ),
+    "and only the blocking one says auto-run is paused",
+    any("paused" in line for line in undo.PAUSE_LINES[undo.PAUSE_GLOBAL_UNDO])
+    and not any("paused" in line for line in undo.PAUSE_LINES[undo.PAUSE_EDIT_MODE]),
+)
+# The edit-mode warning has to state the cost, because that is the whole of what makes
+# accepting it "knowing". MEASURED, `tools/undo_step_probe.py` case 10: with scale 2.0 in
+# a step of the user's own and 3.0 set by a turn in edit mode, one Ctrl+Z landed on 1.0 -
+# the turn and the user's own change together.
+check(
+    "the edit-mode warning says no step is recorded",
+    any("No undo step is recorded" in line for line in undo.PAUSE_LINES[undo.PAUSE_EDIT_MODE]),
+)
+check(
+    "and states the measured consequence: Ctrl+Z takes the user's own change too",
+    any("together with your own" in line for line in undo.PAUSE_LINES[undo.PAUSE_EDIT_MODE]),
+)
+check(
+    "and offers the way to avoid it",
+    any("Press Tab" in line for line in undo.PAUSE_LINES[undo.PAUSE_EDIT_MODE]),
 )
 check(
     "the Global Undo banner still offers the fix",
@@ -1784,6 +1822,10 @@ check(
 check(
     "the edit-mode banner offers nothing but leaving edit mode",
     undo.PAUSE_ACTION[undo.PAUSE_EDIT_MODE] == "",
+)
+check(
+    "and the receipt for an edit-mode turn repeats the measured consequence",
+    any("together with your own last change" in line for line in undo.REFUSAL_LINES[undo.REFUSED_EDIT_MODE]),
 )
 
 

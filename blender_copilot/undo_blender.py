@@ -72,11 +72,14 @@ def _live() -> tuple[bool, str]:
 
 
 def pause_reason(context=None) -> str | None:
-    """Why auto-run must not start now, or `None` (`undo.pause_reason`, §4).
+    """What the panel should warn about now, or `None` (`undo.pause_reason`, §4).
 
     Takes the context the caller already has - the panel's `draw` gets one, and
     `Send` gets one - because reading `bpy.context` behind the caller's back is
     what makes this untestable off a GUI. `None` means "use the real one".
+
+    A *warning*, not a gate: `Send` asks `blocking_reason`, so a reason returned
+    here can be shown to the user without stopping them.
     """
     if context is None:
         global_undo, mode = _live()
@@ -84,6 +87,22 @@ def pause_reason(context=None) -> str | None:
         global_undo = bool(context.preferences.edit.use_global_undo)
         mode = str(getattr(context, "mode", "") or "")
     return undo.pause_reason(global_undo, mode)
+
+
+def blocking_reason(context=None) -> str | None:
+    """Why `Send` must refuse, or `None`.
+
+    Strictly narrower than `pause_reason`: Global Undo off stops the turn, edit mode
+    does not. That split is the owner's decision of 2026-09-26 - "let the user take
+    the risk knowingly" - and it is the panel's gate and the `Send` operator's check,
+    so the disabled button and the refusal cannot disagree with each other.
+    """
+    if context is None:
+        global_undo, mode = _live()
+    else:
+        global_undo = bool(context.preferences.edit.use_global_undo)
+        mode = str(getattr(context, "mode", "") or "")
+    return undo.blocking_reason(global_undo, mode)
 
 
 # ---------------------------------------------------------------------------

@@ -569,6 +569,115 @@ def case_8() -> None:
     enter_object_mode()
 
 
+def case_10(session) -> None:
+    """A turn that STARTS and RUNS in edit mode: allowed, unprotected, and measured.
+
+    The owner's decision of 2026-09-26 was that a user may take this risk **knowingly**
+    - they asked why Send was disabled while editing a cube, and chose the warning over
+    the block. So the job of this case is to put a number on what they are accepting
+    rather than an adjective:
+
+      * the turn is accepted in edit mode at all (it was refused before this case
+        existed - that refusal is what `case_6` pins for Global Undo off, and what this
+        case proves is *not* the behaviour for edit mode);
+      * no push is attempted, which is the destructive part kept out of reach;
+      * the object being edited survives - the hazard `case_8` demonstrates needs a push
+        to fire;
+      * and Ctrl+Z afterwards does <what the log says>, which is the risk itself.
+
+    A baseline is pushed first, as the addon's own first turn would, so "reaches past
+    it" is detectable: if the undo takes the baseline's work with it, the log says so.
+    """
+    note("--- case 10: a turn that starts and runs in edit mode (owner's decision)")
+    enter_object_mode()
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.data.objects["Cube"].select_set(True)
+    bpy.context.view_layer.objects.active = bpy.data.objects["Cube"]
+
+    # The fixture is built so the interesting question has an answer. "Did Ctrl+Z revert
+    # the turn" and "did it reach past the turn to older work" produce the SAME state if
+    # nothing sits between them, so a step of the user's own is pushed after the
+    # baseline: scale 1.0 at the baseline, 2.0 in the user's own step, 3.0 set by the
+    # turn. The undo landing on 3.0 -> 2.0 means it reverted exactly the turn; landing on
+    # 1.0 means it ate the user's own step as well.
+    baseline = scale_z()
+    bpy.ops.ed.undo_push(message="probe: baseline")
+    bpy.data.objects["Cube"].scale.z = 2.0
+    bpy.context.view_layer.update()
+    bpy.ops.ed.undo_push(message="probe: the user's own step")
+    mine = scale_z()
+    note(f"fixture: baseline scale {baseline}, the user's own step {mine}")
+
+    # Enter edit mode the way the owner was: through the UI's own operator.
+    bpy.ops.object.mode_set(mode="EDIT")
+    check("the session really is in edit mode", str(bpy.context.mode).startswith("EDIT_"))
+    stop = bc.undo_blender.blocking_reason(bpy.context)
+    note(f"blocking_reason in edit mode -> {stop!r}")
+    check("and Send is NOT blocked there any more", stop is None)
+
+    pushes_before = list(push_labels)
+    names_before = object_names()
+    # A real turn, through the real operator, whose code changes the scene. The change
+    # is a scale on the existing cube: the receipt's own docstring says the bounded
+    # summary cannot see a transform, so this also exercises the `depsgraph_update_post`
+    # flag rather than the diff.
+    code = "cube = bpy.data.objects['Cube']\ncube.scale.z = 3.0\nprint('scaled in', C.mode)"
+    if not turn("scale the cube while I am editing", [tool_round("c10", "Scale the cube", code), prose_round("Scaled.")]):
+        enter_object_mode()
+        return
+    after_scale = scale_z()
+    note(f"after the turn: mode={bpy.context.mode}, Cube.scale.z={after_scale}")
+    check("the turn left the user in edit mode", str(bpy.context.mode).startswith("EDIT_"))
+    check("the turn's change landed", after_scale == 3.0)
+    check("no push was attempted in edit mode", push_labels == pushes_before)
+    check("and the object being edited still exists", "Cube" in object_names())
+
+    receipt = session.last_receipt
+    if isinstance(receipt, dict):
+        note(f"receipt: title={receipt['title']!r} undoable={receipt['undoable']} reason={receipt.get('reason')!r}")
+        check("the receipt says the turn is not undoable", receipt["undoable"] is False)
+        check(
+            "and names edit mode as the reason",
+            receipt.get("reason") == bc.undo.REFUSED_EDIT_MODE,
+        )
+        check(
+            "the receipt does not promise Ctrl+Z reverts it",
+            not any("Ctrl+Z reverts this turn" in line for line in receipt["lines"]),
+        )
+
+    # THE RISK, measured rather than described. One Ctrl+Z while still in edit mode,
+    # then read the scale against the three known values.
+    undid = undo_once()
+    landed = scale_z()
+    note(f"Ctrl+Z in edit mode -> {undid}; Cube.scale.z={landed}, objects={object_names()}")
+    check("the undo did not delete the object being edited", "Cube" in object_names())
+    if landed == mine:
+        note(
+            "RESULT: Ctrl+Z reverted exactly the turn's change (3.0 -> 2.0) and left the "
+            "user's own earlier step alone"
+        )
+    elif landed == baseline:
+        note(
+            "RESULT: Ctrl+Z reached PAST the turn (3.0 -> 1.0) and undid the user's own "
+            "earlier step as well - that is the risk, and the panel copy says so"
+        )
+    else:
+        note(f"RESULT: Ctrl+Z landed somewhere else: scale {landed} (3.0 turn, 2.0 own step, 1.0 baseline)")
+
+    # And once more from Object mode, which is where a user usually presses it.
+    enter_object_mode()
+    undid_object = undo_once()
+    note(
+        f"Ctrl+Z from object mode -> {undid_object}; Cube.scale.z={scale_z()}, "
+        f"objects={object_names()}"
+    )
+    check("and that one did not delete anything either", "Cube" in object_names())
+    note(
+        f"the numbers above ARE the risk the owner accepted: {baseline} baseline, "
+        f"{mine} the user's own step, 3.0 the turn"
+    )
+
+
 def case_9(session) -> None:
     """A last real turn, so a *pushed* receipt is what the screen shows.
 
@@ -761,6 +870,7 @@ def main() -> int:
     case_6(session)
     case_7()
     case_8()
+    case_10(session)
     case_9(session)
 
     if not bpy.app.background:

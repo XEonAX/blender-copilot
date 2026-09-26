@@ -298,14 +298,14 @@ class BLENDER_COPILOT_OT_send(bpy.types.Operator):
         if session.streaming:
             self.report({"INFO"}, "A turn is already running")
             return {"CANCELLED"}
-        # §4's pause. Asked through `undo_blender` so the banner, this refusal and
-        # the disabled button all answer from the same rule - and asked with
-        # *this* context, because that is the one the panel is drawing for.
-        pause = undo_blender.pause_reason(context)
-        if pause:
+        # The *blocking* rule. Edit mode is the user's call to make - they are told what
+        # it costs in the banner and allowed to proceed (owner, 2026-09-26) - so only
+        # Global Undo off stops a send here.
+        blocked = undo_blender.blocking_reason(context)
+        if blocked:
             self.report(
                 {"ERROR"},
-                f"{undo.PAUSE_LINES[pause][0]} Auto-run is paused",
+                f"{undo.PAUSE_LINES[blocked][0]} Auto-run is paused",
             )
             return {"CANCELLED"}
 
@@ -1100,17 +1100,22 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
     def _draw_actions(self, layout, context, wrap_chars):
         session = conversation.session
         row = layout.row(align=True)
-        paused = bool(undo_blender.pause_reason(context))
+        # The *blocking* rule, not the warning one: since 2026-09-26 edit mode is
+        # disclosed and allowed rather than refused (owner: "let the user take the risk
+        # knowingly"), so a red banner above must not leave a disabled button below it.
+        # Global Undo off still blocks, and its banner carries the one-click fix.
+        blocked = bool(undo_blender.blocking_reason(context))
         if session.streaming:
             # Stop replaces Send in the same slot, so its position never moves.
             row.operator("blender_copilot.stop", text="Stop", icon="PAUSE")
         else:
             sub = row.row(align=True)
-            # Disabled when auto-run is paused, and when there is no transport to
-            # send through. A Send that cannot work must not look pressable - and
-            # the pause is `undo_blender`'s answer here, not a second reading of
-            # the preference, so the button and the banner cannot disagree.
-            sub.enabled = not paused and not session.transport_error
+            # Disabled only when a blocking reason exists (Global Undo off), or when
+            # there is no transport to send through. A Send that cannot work must not
+            # look pressable - and the reason is `undo_blender`'s answer here, not a
+            # second reading of the preference, so the button, the banner and the
+            # operator's own refusal cannot disagree.
+            sub.enabled = not blocked and not session.transport_error
             sub.operator("blender_copilot.send", text="Send", icon="PLAY")
         row.operator("blender_copilot.clear", text="Clear", icon="TRASH")
 

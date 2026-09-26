@@ -833,16 +833,20 @@ def main() -> None:
         assert ("operator", "blender_copilot.send", "Send") in log, log
         print("ok   and Send is drawn disabled while auto-run is paused")
 
-        # Edit mode pauses too - *Confirm the four undo cases in a GUI* measured
-        # that a push there records nothing usable and the undo after it deletes
-        # the object - and its banner is a different one with no button, because
-        # the fix is the user's own Tab key.
+        # Edit mode: a WARNING, and Send stays live. The owner changed this on
+        # 2026-09-26 - "let the user take the risk knowingly" - after asking why Send
+        # was disabled while editing. The measurement behind the old pause still holds
+        # (`undo_push` there records nothing usable and the undo after it deletes the
+        # object) and the push is still refused, but refusing to *start* meant the agent
+        # was unusable in the mode where modelling happens. So both halves are pinned:
+        # the banner still states the cost, and the button is NOT disabled.
         edit = fake_context(mode="EDIT_MESH")
         log = []
         instance._draw_header(StubLayout(log), edit)
         joined = " ".join(entry[1] for entry in log if entry[0] == "label")
         assert undo.PAUSE_LINES[undo.PAUSE_EDIT_MODE][0] in joined, joined
-        assert "Auto-run is paused" in joined, joined
+        assert "Ctrl+Z will then undo this turn together with your own" in joined, joined
+        assert "Auto-run is paused" not in joined, joined
         assert (
             "operator",
             "blender_copilot.enable_global_undo",
@@ -850,8 +854,20 @@ def main() -> None:
         ) not in log, log
         log = []
         instance._draw_actions(StubLayout(log), edit, panel.wrap_budget(context))
-        assert send_is_disabled(log), log
-        print("ok   edit mode pauses it too, with its own banner and no button")
+        assert not send_is_disabled(log), log
+        assert ("operator", "blender_copilot.send", "Send") in log, log
+        print("ok   edit mode warns and enables Send; Global Undo off blocks it")
+
+        # The two rules are different by construction, and that is the claim worth
+        # pinning: `blocking_reason` is strictly narrower than `pause_reason`, so a
+        # future "tidy-up" that collapses them fails here rather than in a user's
+        # editing session.
+        assert undo.pause_reason(True, "EDIT_MESH") == undo.PAUSE_EDIT_MODE
+        assert undo.blocking_reason(True, "EDIT_MESH") is None
+        assert undo.blocking_reason(False, "EDIT_MESH") == undo.PAUSE_GLOBAL_UNDO
+        assert undo.blocking_reason(False, "OBJECT") == undo.PAUSE_GLOBAL_UNDO
+        assert undo.blocking_reason(True, "OBJECT") is None
+        print("ok   the gate is strictly narrower than the warning")
 
         # And with neither pause, no banner and a live Send.
         log = []
