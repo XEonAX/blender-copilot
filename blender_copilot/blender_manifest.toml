@@ -10,7 +10,10 @@ type = "add-on"
 # Target is the installed Blender, not the 5.3-alpha source clone.
 blender_version_min = "5.2.0"
 
-# Placeholder while this is a private dev tool; revisit before any distribution.
+# Required by the extension platform - this key is NOT optional, and NOT a licence
+# grant. Verified: deleting it fails `blender -c extension validate` with
+# `missing "license"`. No LICENSE file has been added and no terms have been chosen,
+# so treat reuse as unlicensed until the author picks a real one.
 license = [
   "SPDX:GPL-3.0-or-later",
 ]

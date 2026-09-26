@@ -2,9 +2,14 @@
 
 # Blender Copilot
 
-**A chat panel that lives *inside* Blender.** It runs an agent loop in Blender's own
-Python process, executes the model's `bpy` against your live scene, and wraps the
-whole turn in **one Ctrl+Z**.
+**Five sentences in. A spaceship out.**
+
+A Copilot-style chat panel that lives *inside* Blender. It runs an agent loop in
+Blender's own Python process, executes the model's `bpy` against your live scene, and
+wraps the whole turn in **one Ctrl+Z**.
+
+No bridge. No sidecar. No second copy of your scene to keep in sync — the loop *is*
+Blender's Python, so `bpy.context` is live and correct by construction.
 
 ![Blender](https://img.shields.io/badge/Blender-5.2.2-E87D0D?logo=blender&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.13%20%28bundled%29-3776AB?logo=python&logoColor=white)
@@ -12,7 +17,8 @@ whole turn in **one Ctrl+Z**.
 ![Suites](https://img.shields.io/badge/CPython%20suites-4%2C%20green-brightgreen)
 ![Tickets](https://img.shields.io/badge/wayfinder%20tickets-18%2F18%20resolved-blue)
 ![Status](https://img.shields.io/badge/status-prototype-yellow)
-![Licence](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue)
+![Made with bpy](https://img.shields.io/badge/made%20with-bpy-1f6feb)
+![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)
 
 <img src="docs/media/turn.gif" width="880" alt="Five turns in the Copilot panel: a prompt, streamed reasoning, tool rows, and a spaceship being built in the viewport next to it.">
 
@@ -24,6 +30,23 @@ The GIF is the build, cut to 17 s; the flight is played at the end of the
 animation that is never played looks exactly like no animation at all.</sub>
 
 </div>
+
+---
+
+### Why it is different, in three lines
+
+- 🧬 **The agent runs *inside* Blender, not beside it.** Same process, same
+  `bpy.context`, same selection, same mode, same undo stack. Nothing needs mirroring
+  because nothing is on the other side.
+- ↩️ **One turn = one undo step.** `Ctrl+Z` takes back every call the turn made — and
+  the receipt beside the transcript states what that step does *not* cover. Measured
+  both ways, including the case where pushing early makes undo reach too far.
+- 🔬 **The results that lost are published.** A capability guard that a 77-attempt probe
+  showed does *not* contain was therefore **not built**. Most numbers below are the
+  numbers that killed a design.
+
+<sub>Star it if you want to see where this goes — and read
+[what it does not do](#what-it-does-not-do) before you point it at a real file.</sub>
 
 ---
 
@@ -104,8 +127,11 @@ written down anyway.
 **Where this stands.** A working vertical slice inside a real Blender 5.2.2: the panel,
 the loop, the three tools, per-turn undo, streaming, the context budget and per-`.blend`
 history all run, and every picture here came out of an actual GUI session. It is **not**
-published to the extensions platform yet, and the manifest's licence line is still
-marked a placeholder. What is missing is listed under
+published to the extensions platform yet. **There is no `LICENSE` file in this
+repository**, so no terms have actually been chosen: the manifest's `license` key is a
+value the extension platform *requires* to be present (removing it fails validation with
+`missing "license"`), not a grant. Treat reuse as unlicensed until a real one lands.
+What is missing is listed under
 [what it does not do](#what-it-does-not-do) rather than left to be found.
 
 ## What it does
@@ -324,7 +350,14 @@ it is the rule that keeps the probes honest.
 <sub>
 
 Built by **XEonAX** · `bl_ext.user_default.blender_copilot` · **0.0.1**
-Licence: GPL-3.0-or-later, as the manifest declares.
+
+**No licence chosen yet** — nothing here is licensed for reuse until one is.
+
+⭐ Star it if it saves you time, and
+[argue with a decision](.scratch/blender-copilot/map.md) if you think it is wrong —
+the map states what was rejected and why, which is the part usually missing.
+
+`#blender` `#bpy` `#aiagents` `#llm` `#deepseek` `#python` `#3d`
 
 </sub>
 </div>
