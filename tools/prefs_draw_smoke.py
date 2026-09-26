@@ -185,6 +185,11 @@ def main() -> int:
     check("the key field is drawn", "api_key" in props)
     check("the base URL is drawn", "base_url" in props)
     check("the model is drawn", "model" in props)
+    # The two caps. `context_history_kib` existed and was read for a whole ticket's worth
+    # of work without being drawn anywhere, which made it a lever only for somebody who
+    # knew the RNA name - so both are checked here rather than one.
+    check("the round cap is drawn", "rounds_per_turn" in props)
+    check("and so is the history budget", "context_history_kib" in props)
 
     joined = " ".join(labels)
     check(

@@ -210,6 +210,25 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
     # smaller model - which is why it stops at 512 KiB rather than at the derived
     # default, and what it buys is earlier, visible trimming instead of a rejected
     # request.
+    # Rounds are the other cap the user can raise. 0 ships for the same reason the
+    # budget's 0 ships: the designed value is the right default, and a lever exists for
+    # the jobs that outgrow it. MEASURED 2026-09-26, owner: a six-part detail pass hit
+    # the designed 8 mid-work and needed a second `Send "continue"`; ticket 09's stated
+    # reason for 8 ("without eating the context window") is also weaker now, because the
+    # projection trims history to fit (ticket 14) - what a long turn actually costs is
+    # time and tokens, not context.
+    rounds_per_turn: bpy.props.IntProperty(
+        name="Rounds per turn",
+        description=(
+            "How many model rounds one turn may take before the agent stops and asks "
+            "you to continue. 0 uses the designed 8; more lets a long job finish in "
+            "one go, at the cost of time and tokens"
+        ),
+        default=0,
+        min=0,
+        max=conversation.MAX_ROUNDS_LIMIT,
+    )
+
     context_history_kib: bpy.props.IntProperty(
         name="History budget (KiB)",
         description=(
@@ -265,6 +284,27 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
                 "the model to DEEPSEEK_MODEL and then to deepseek-flash. Model names "
                 "churn, and a retired name is accepted while silently serving "
                 "something else - prefer a name copied from the provider's live docs.",
+                budget,
+            ),
+        )
+
+        # The two caps the user can raise, together because they are the same kind of
+        # thing: a designed value that a bigger job can outgrow. `context_history_kib`
+        # was NOT drawn here until now - it existed and was read, but nothing in the UI
+        # reached it, which made it a lever only for somebody who knew the RNA name.
+        limits = layout.box()
+        limits.label(text="Limits", icon="SETTINGS")
+        limits.prop(self, "rounds_per_turn", text="Rounds per turn")
+        limits.prop(self, "context_history_kib", text="History budget (KiB)")
+        prose(
+            limits,
+            conversation.wrap(
+                "0 in either field means the value this addon was designed with: "
+                f"{conversation.MAX_ROUNDS} rounds per turn, and a history budget "
+                "derived from the model's context window. More rounds lets one long "
+                "job finish without a second \"continue\" and costs time and tokens; "
+                "a smaller history budget makes the model see fewer older turns "
+                "sooner.",
                 budget,
             ),
         )

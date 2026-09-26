@@ -130,6 +130,25 @@ def history_budget_bytes() -> int:
     return context.DEFAULT_HISTORY_BUDGET_BYTES
 
 
+def rounds_per_turn() -> int:
+    """Rounds one turn may take: the preference, or `conversation.MAX_ROUNDS`.
+
+    `0` means "the designed default", the same convention `context_history_kib` uses, so
+    an untouched install behaves exactly as ticket 09 §1 specified and raising the cap is
+    a deliberate act rather than something a user inherits. Read fresh per check, so
+    raising it applies to the next round rather than at the next restart - and a broken
+    value is not an error: a turn must not stop over a mistyped preference.
+    """
+    try:
+        addon = bpy.context.preferences.addons.get(__package__)
+        value = int(getattr(addon.preferences, "rounds_per_turn", 0) or 0)
+    except Exception:  # noqa: BLE001 - no preferences, no window, or a stub context
+        value = 0
+    if value > 0:
+        return min(value, conversation.MAX_ROUNDS_LIMIT)
+    return conversation.MAX_ROUNDS
+
+
 def set_budget_override(bytes_: int | None) -> None:
     """Compact (or Restore, with `None`): a session-scoped budget for this conversation.
 
@@ -255,4 +274,5 @@ conversation.session.attach(
     context=prompt.context,
     undo=undo_blender,
     budget=history_budget_bytes,
+    rounds=rounds_per_turn,
 )

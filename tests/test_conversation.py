@@ -1161,6 +1161,52 @@ check("and it names the cap rather than failing silently", "8 rounds" in rounds.
 check("the cap leaves an error block, not an unwinding", rounds.messages[-1].kind == conversation.KIND_ERROR)
 check("history stays sendable after a cap", unanswered(rounds.history) == [])
 
+# The cap is a lever, not a constant (owner, 2026-09-26: a six-part detail pass hit the
+# designed 8 mid-work). What is checked here is the *hook*: the preference moves the cap,
+# the message quotes the cap that actually applied, and nothing a preference can do
+# stops a turn - `0` and garbage both mean the designed default, the same way
+# `context_history_kib` does. Why `round_source` rather than a stored int: the answer
+# lives in `bpy` preferences and this module imports no `bpy`.
+lever = conversation.Conversation()
+lever_sender = FakeSender()
+wire(lever, lever_sender)
+# 11, not 3: the point is a cap *above* the designed 8, which is the lever's whole
+# purpose. The count is 10 rather than 11 because the first round is the user's own
+# message - the same relation the designed-cap check above pins (`MAX_ROUNDS - 1`).
+lever.round_source = lambda: 11
+lever.begin_turn("a job that needs four rounds")
+spins = 0
+while lever.streaming and spins < 40:
+    spins += 1
+    deliver(lever, calls=[wire_call(f"l{spins}", f"Step {spins}", "pass")])
+    lever.pump()
+    lever.pump()
+check("a raised preference raises the cap", len(lever_sender.sent) == 11 - 1)
+check("and it stops at the number the preference asked for", "11 rounds" in lever.messages[-1].text)
+check("not at the designed one", "8 rounds" not in lever.messages[-1].text)
+
+for value, label in ((0, "zero means the designed default"), (None, "no preference at all")):
+    probe = conversation.Conversation()
+    probe.round_source = (lambda v=value: v)
+    check(f"{label}: {conversation.MAX_ROUNDS} rounds", probe.max_rounds() == conversation.MAX_ROUNDS)
+
+
+def _explode():
+    raise ValueError("a preference that cannot be read")
+
+
+probe = conversation.Conversation()
+probe.round_source = _explode
+check("a preference that raises does not stop the turn", probe.max_rounds() == conversation.MAX_ROUNDS)
+probe.round_source = lambda: "lots"
+check("and neither does a value that is not a number", probe.max_rounds() == conversation.MAX_ROUNDS)
+probe = conversation.Conversation()
+check("with no hook wired, the designed default is what runs", probe.max_rounds() == conversation.MAX_ROUNDS)
+check(
+    "and the ceiling is a bound, not a suggestion",
+    conversation.MAX_ROUNDS_LIMIT >= conversation.MAX_ROUNDS,
+)
+
 repeated = conversation.Conversation()
 wire(repeated, FakeSender())
 ran = []

@@ -132,7 +132,21 @@ PHASE_TOOL = "tool"
 # context window. 24 calls bounds a single round that returns many parallel calls.
 # The repeat detector fires on the *third* identical call - tool plus canonical
 # arguments - and the failure stop counts rounds, not calls.
+#
+# MEASURED 2026-09-26, owner: 8 rounds is too few for a big modelling job. A
+# six-part detail pass ("nacelle pylons, nose sensor booms, dorsal rails, ventral
+# skids, nacelle blades and warm marker lights") hit the cap mid-work and needed a
+# second `Send "continue"`. Ticket 09's stated reason - "without eating the context
+# window" - is also weaker than it was: the projection trims history to fit a budget
+# derived from the window (ticket 14), so context is no longer the binding
+# constraint; spend and wall-clock are. The designed default is therefore kept at 8
+# (nobody's ratified behaviour changes silently) and the cap is readable through
+# `round_source`, which `stream` wires to a preference.
 MAX_ROUNDS = 8
+# The preference's ceiling, so a runaway cannot be configured into an unbounded
+# turn: at ~4 rounds a minute this is well over an hour, which is past any
+# legitimate use and still bounded.
+MAX_ROUNDS_LIMIT = 64
 MAX_TOOL_CALLS = 24
 REPEAT_LIMIT = 3
 FAIL_STREAK_LIMIT = 3
@@ -539,6 +553,11 @@ class Conversation:
         # How to read the history budget, injected through `attach` because it
         # needs the addon's preferences and this module may not import `bpy`.
         self.budget_source = None
+        # The rounds-per-turn cap, asked the same way and for the same reason: the
+        # answer comes from a `bpy` preference, and this module imports no `bpy`. Read
+        # fresh per check so raising it takes effect on the next round rather than at
+        # the next restart.
+        self.round_source = None
         # Ticket 14 §5's `meta.context_trim`, folded a turn at a time and written
         # with the conversation. Informational: the chip is derived, never read
         # from here.
@@ -1091,7 +1110,23 @@ class Conversation:
             message.expanded = not message.expanded
 
     # -- the loop (ticket 09 §0) ---------------------------------------------
-    def attach(self, send, execute, context, undo=None, budget=None) -> None:
+    def max_rounds(self) -> int:
+        """Rounds this turn may take: the designed `MAX_ROUNDS`, or the preference.
+
+        The same shape as `budget_bytes`: a callable rather than a value, because the
+        answer lives in the preferences and this module must not import `bpy`, and
+        defensive about a broken value because a mistyped preference must not stop a
+        turn - `0` and anything unreadable both mean "the designed default".
+        """
+        if self.round_source is None:
+            return MAX_ROUNDS
+        try:
+            value = int(self.round_source() or 0)
+        except Exception:  # noqa: BLE001 - a broken preference must not stop a turn
+            return MAX_ROUNDS
+        return value or MAX_ROUNDS
+
+    def attach(self, send, execute, context, undo=None, budget=None, rounds=None) -> None:
         """Wire the loop's three collaborators, and the undo side if there is one.
 
         Nothing here may import `bpy` - the CPython checks are the only way to
@@ -1118,6 +1153,11 @@ class Conversation:
           * `undo.close_turn` runs inside a `finally` in `_end_turn`, which is
             ticket 12 §1's wording and not decoration: a path that dies halfway
             through ending a turn still leaves the user a Ctrl+Z.
+          * `budget() -> int` and `rounds() -> int` - the two caps the user can raise:
+            the bytes of history one request may carry, and how many rounds one turn
+            may take. Both are asked fresh (`budget_bytes`, `max_rounds`) and both
+            fall back to the designed value when unset, so the loop's own defaults are
+            what run until somebody asks for more.
           * `budget() -> int` - the bytes of prunable history this session may
             send, read fresh for every request so the addon's preference is a
             lever rather than a setting that needs a restart. It is a callable and
@@ -1133,6 +1173,7 @@ class Conversation:
         self.context = context
         self.undo = undo
         self.budget_source = budget
+        self.round_source = rounds
 
     def pump(self) -> bool:
         """Exactly one bounded step of the turn's state machine, or nothing.
@@ -1218,8 +1259,8 @@ class Conversation:
                     'Send "continue" to keep going.'
                 )
             return None
-        if self._rounds >= MAX_ROUNDS:
-            return f'Stopped after {MAX_ROUNDS} rounds. Send "continue" to keep going.'
+        if self._rounds >= self.max_rounds():
+            return f'Stopped after {self.max_rounds()} rounds. Send "continue" to keep going.'
         if self._fail_streak >= FAIL_STREAK_LIMIT:
             return (
                 f"Stopped after {FAIL_STREAK_LIMIT} rounds in a row where every call "
