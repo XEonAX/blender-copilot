@@ -88,3 +88,13 @@ questions and use different vocabularies:
   and must not be mistaken for them: they carry `Triage: ready-for-agent`, and a
   finished one means "code exists", never "a design was settled". Work the
   frontier — any ticket whose blockers are done.
+
+  One carve-out from *a resolved ticket is never reopened*, and it applies only
+  here: a **build** ticket may be returned to `open` when the orchestrator's own
+  verification fails, with the exact failing command and its output appended under
+  a `## Verification failed` heading. A build ticket's `resolved` is a claim about
+  code, and code can be re-run — where a decision's `resolved` is a claim about an
+  argument, and a second session contradicting it in place would destroy the very
+  record the decision exists to keep. The carve-out is for the orchestrator
+  correcting its own run, not for a later session disagreeing: a committed ticket
+  that turns out wrong gets a new ticket that names it.
