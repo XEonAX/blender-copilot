@@ -113,11 +113,17 @@ def finish(reason: str) -> dict:
     return {"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]}
 
 
-def tool_round(code: str, purpose: str, prose: str = "") -> list[dict]:
+def tool_round(code: str, purpose: str, prose: str = "", call_id: str = "call_wire_1") -> list[dict]:
     """One round whose reply asks for `run_blender_python`, arguments fragmented.
 
     The fragmentation is the point: the provider streams `function.arguments` in
     pieces, so a worker that overwrites instead of concatenating loses the call.
+
+    `call_id` must differ **per call**, not merely per probe. Two calls sharing one
+    id made this probe lie for a while: round four went out carrying the second
+    call with no matching result, because the id was already answered by the first
+    turn, and the check that reads it failed against a product that was fine. A
+    provider never reuses an id, so neither may this.
     """
     arguments = json.dumps({"code": code, "purpose": purpose})
     cut_a, cut_b = 18, 41
@@ -130,7 +136,7 @@ def tool_round(code: str, purpose: str, prose: str = "") -> list[dict]:
                 "tool_calls": [
                     {
                         "index": 0,
-                        "id": "call_wire_1",
+                        "id": call_id,
                         "type": "function",
                         "function": {"name": "run_blender_python", "arguments": arguments[:cut_a]},
                     }
@@ -155,7 +161,12 @@ def prose_round(text: str) -> list[dict]:
 ROUNDS = [
     tool_round(CODE, "Scale Cube 1.3x on Z", "The cube is active, so I will scale it."),
     prose_round("Done: the cube is taller on Z."),
-    tool_round(FAILING_CODE, "Try a bigger scale", "Trying a larger change."),
+    tool_round(
+        FAILING_CODE,
+        "Try a bigger scale",
+        "Trying a larger change.",
+        call_id="call_wire_2",
+    ),
     prose_round("That failed, so I stopped there."),
 ]
 
@@ -303,9 +314,25 @@ def main() -> int:
     # -- 4. the traceback reached the model on the following round ----------
     fourth = requests[3]["body"]["messages"]
     traceback_result = [message for message in fourth if message.get("role") == "tool"][-1]
+    traceback_content = traceback_result["content"]
+    if "RuntimeError: native call blew up after the change" not in traceback_content:
+        # Say what did arrive: a bare FAILED here is unactionable, because the
+        # traceback can be elided, re-keyed or replaced by a summary upstream.
+        note(f"what the model got instead, first 500 chars: {traceback_content[:500]!r}")
+        shape = []
+        for message in fourth:
+            role = message.get("role")
+            calls = [call.get("id") for call in (message.get("tool_calls") or [])]
+            if role == "tool":
+                shape.append(f"tool->{message.get('tool_call_id')}")
+            elif calls:
+                shape.append(f"{role} calls={calls}")
+            else:
+                shape.append(str(role))
+        note(f"round four, in order: {' '.join(shape)}")
     check(
         "the failing call's traceback is in the next request",
-        "RuntimeError: native call blew up after the change" in traceback_result["content"],
+        "RuntimeError: native call blew up after the change" in traceback_content,
     )
     check(
         "and the change it made before raising is reported, not undone",

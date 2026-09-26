@@ -1504,13 +1504,21 @@ def parse_arguments(call: dict) -> dict | None:
 def prelude(world) -> dict:
     """The prelude dict for model code, from whatever the caller supplied.
 
-    Two forms are accepted, deliberately. `toolbox.LiveWorld` is asked for
+    Three forms are accepted, deliberately. `toolbox.LiveWorld` is asked for
     `bindings()`; a bare callable *is* the prelude provider - which is what the
     sandbox's own checks pass, because the prelude is the only thing
     `run_blender_python` needs from Blender, and a fake there is the whole point of
-    keeping the sandbox bpy-free.
+    keeping the sandbox bpy-free; and a bare **dict** is the prelude itself, which
+    is what `tools/loop_wire_probe.py` passes.
+
+    The dict form used to fall through the `callable` test and come back empty, so
+    the model's code ran against an empty namespace and died on its first name -
+    seven wire-probe checks failed on that, and the suite missed it because the
+    suite happens to pass a callable.
     """
     provider = getattr(world, "bindings", None) or world
+    if isinstance(provider, dict):
+        return provider
     if not callable(provider):
         return {}
     value = provider()

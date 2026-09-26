@@ -367,6 +367,18 @@ bound = execution.execute_tool(
 check("arguments arrive as a string and are parsed", bound["ok"] is True)
 check("the prelude reached the code", bound["envelope"]["stdout"].strip() == "live")
 
+# The dict form was in the docstring and the callers but not the code: it fell
+# through the `callable` test and came back empty, so seven wire-probe checks
+# failed while every check here passed. Pin it.
+literal = execution.execute_tool(
+    wire_call("a2", "Read the tag", "print(bpy.tag)"),
+    {"bpy": SimpleNamespace(tag="dict-live")},
+)
+check(
+    "a bare dict prelude is used as-is",
+    literal["envelope"]["stdout"].strip() == "dict-live",
+)
+
 unknown = execution.execute_tool(
     {"id": "a2", "function": {"name": "frobnicate", "arguments": "{}"}}, {}
 )
