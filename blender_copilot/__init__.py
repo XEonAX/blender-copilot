@@ -3,8 +3,10 @@
 One real turn works end to end: a prompt typed in the panel goes to a worker
 subprocess (`transport.py` launches `_worker.py`, which is HTTP and SSE only),
 the reply streams back over a pipe, and a `bpy.app.timers` drain repaints the
-sidebar as it arrives. No tools, no persistence and no undo push yet - those
-are the next passes, and the map says which tickets own them.
+sidebar as it arrives. The three tools (`run_blender_python`, `get_scene_info`,
+`get_rna_info`) are declared and run on Blender's main thread (`toolbox.py`); no
+persistence and no undo push yet - those are the next passes, and the map says
+which tickets own them.
 
 No `bl_info` here on purpose: as an extension, Blender synthesises `bl_info`
 from `blender_manifest.toml` and deletes any hand-written one with a warning.

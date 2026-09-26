@@ -865,8 +865,8 @@ def _demo() -> list[Message]:
         Message("user", "What is selected right now?"),
         Message(
             "assistant",
-            "Nothing is inspecting the scene yet - this prototype has no tools. "
-            "The real loop would answer from get_scene_info.",
+            "The real loop answers this from get_scene_info. This transcript is "
+            "a static fixture, so the reply is canned.",
         ),
         Message(
             "assistant",

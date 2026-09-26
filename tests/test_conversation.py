@@ -335,13 +335,13 @@ check("arguments arrive as a string and are parsed", bound["ok"] is True)
 check("the prelude reached the code", bound["envelope"]["stdout"].strip() == "live")
 
 unknown = execution.execute_tool(
-    {"id": "a2", "function": {"name": "get_scene_info", "arguments": "{}"}}, {}
+    {"id": "a2", "function": {"name": "frobnicate", "arguments": "{}"}}, {}
 )
 check(
     "an unknown tool is named and runs nothing",
     unknown["ok"] is False
     and unknown["envelope"]["error"]["kind"] == "tool_argument_error"
-    and "get_scene_info" in unknown["envelope"]["error"]["message"],
+    and "frobnicate" in unknown["envelope"]["error"]["message"],
 )
 
 broken = execution.execute_tool(

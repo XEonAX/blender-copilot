@@ -246,7 +246,11 @@ def scenario_1(session, worker, cube) -> None:
     )
     check(
         "the live scene summary is still the last message",
-        second[-1]["role"] == "system" and second[-1]["content"].startswith("Live scene:"),
+        second[-1]["role"] == "system"
+        # It is the `get_scene_info` summary scope, serialised (one definition for
+        # both consumers), so it is JSON with a `captured` stamp rather than the
+        # hand-written sentence it used to be.
+        and json.loads(second[-1]["content"]).get("captured") == "turn_start",
     )
     check("the turn ended", not session.streaming and session.phase == "idle")
     check("history is sendable: nothing is unanswered", unanswered(session.history) == [])
