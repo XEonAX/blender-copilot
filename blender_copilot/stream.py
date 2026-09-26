@@ -44,6 +44,8 @@ sidesteps it.
 
 from __future__ import annotations
 
+import time
+
 import bpy
 
 from . import conversation, context, prompt, scope, toolbox, transport, undo_blender
@@ -52,6 +54,16 @@ from . import conversation, context, prompt, scope, toolbox, transport, undo_ble
 # 0.02 ms, so this is two orders of magnitude above the IPC it is watching -
 # which is the point: the tick must never be the bottleneck.
 TICK = 0.05
+
+# How often a tick repaints *purely to keep the working indicator moving*. The
+# rule elsewhere in this file is that a redraw is tagged only when something the
+# user can see changed - which, during a model's think, is never: a think produces
+# no events at all. So the spinner would sit frozen in exactly the state it exists
+# to announce, and a frozen spinner is indistinguishable from a dead one. Ten
+# frames a second reads as motion and is a fraction of the repaints the event
+# stream itself causes while text streams in.
+ANIMATION_SECONDS = 0.1
+_last_animation = 0.0
 
 
 def _prefs():
@@ -147,6 +159,18 @@ def _tick():
     """
     changed = False
     was_streaming = conversation.session.streaming
+    # The animation's own clock, and the one reason in this file to repaint when
+    # nothing changed. Deliberately only while `streaming`: the indicator is drawn
+    # then and only then, so a repaint for it in any other state is a repaint that
+    # changes no pixel - and the tail of a cancelled turn (`worker.busy` with no
+    # turn) would otherwise keep a still panel repainting until the child admitted
+    # it.
+    global _last_animation
+    if conversation.session.streaming:
+        moment = time.monotonic()
+        if moment - _last_animation >= ANIMATION_SECONDS:
+            _last_animation = moment
+            changed = True
     try:
         events = transport.worker.tick()
         if events:

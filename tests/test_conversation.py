@@ -833,6 +833,56 @@ capped.end_turn()
 check("the turn's clock stops with the turn", capped.turn_open is False)
 check("the next turn starts it again", capped.begin_turn() is True and capped.turn_open)
 
+# What the turn's ledger actually counts. It used to be wall clock from the turn's
+# start, which charged the model's *thinking* - and every HTTP round trip - to a
+# budget whose purpose is to bound model-authored code. Two live runs measured the
+# difference rather than the principle (2026-09-26): 67 s and 79 s turns whose code
+# added up to a few seconds were refused the call that would have finished the job,
+# and the refusal said "this turn's budget for running code is used up" about a turn
+# that had barely run any. The documented figure is "60 s cumulative per user turn"
+# of the seconds the alarm can see, so the ledger is the call windows.
+_tick = [0.0]
+
+
+def fake_clock() -> float:
+    return _tick[0]
+
+
+ledger = budget.Limits(call_seconds=10.0, turn_seconds=60.0, poll=1.0, clock=fake_clock)
+ledger.begin_turn()
+_tick[0] += 100.0
+check(
+    "a turn that spends 100s thinking has spent nothing of its code budget",
+    ledger.turn_elapsed == 0.0 and ledger.allowance() == (10.0, budget.KIND_CALL),
+)
+with ledger.call():
+    _tick[0] += 6.0
+check("but the seconds code runs are charged", abs(ledger.turn_elapsed - 6.0) < 0.01)
+with ledger.call():
+    _tick[0] += 55.0
+check("across calls, not just the first", abs(ledger.turn_elapsed - 61.0) < 0.01)
+_tick[0] += 30.0
+# `except ... as name` unbinds `name` when the block ends, so the exception is
+# copied out inside the block - the same shape the other budget checks here use,
+# and the reason the first version of this one raised `NameError` instead of
+# reporting anything about the budget.
+turn_refusal = None
+try:
+    with ledger.call():
+        third_ran = True
+except budget.Exceeded as caught_by_ledger:
+    turn_refusal = caught_by_ledger
+    third_ran = False
+check(
+    "so the next call is refused once the code has added up past the budget",
+    third_ran is False
+    and turn_refusal is not None
+    and turn_refusal.kind == budget.KIND_TURN
+    and ledger.allowance()[0] <= 0.0,
+)
+ledger.end_turn()
+check("and a new turn starts with a full budget", ledger.begin_turn() and ledger.turn_elapsed == 0.0)
+
 # A turn whose budget is already spent refuses the next call *before it runs*, and
 # the loop stops the turn on that refusal. This is the one path where the guard is
 # never armed - there is no window to arm - so a "was this a stop?" test that
@@ -862,6 +912,19 @@ check(
 check(
     "and the loop reads that refusal as a stop",
     conversation._budget_verdict(refused) != {},
+)
+# The sentence the refusal reaches the panel and the model with. A live run
+# produced "7.27s of -7.27s" here (2026-09-26), because the limit is the *negative*
+# remainder for a call refused at the door - a sentinel `_record` needs, and a
+# number nobody should be shown.
+check(
+    "a refusal at the door does not print a negative budget",
+    "s of -" not in refused["envelope"]["error"]["message"]
+    and "already spent" in refused["envelope"]["error"]["message"],
+)
+check(
+    "while an overrun mid-call still reports spent-of-limit",
+    "of 60.00s" in budget.Exceeded(budget.KIND_TURN, 61.5, 60.0).args[0],
 )
 spent_turn = conversation.Conversation()
 wire(spent_turn, FakeSender(), execute=lambda call: refused)
@@ -1976,6 +2039,140 @@ short_session.cancel()
 long.clear()
 check("the chip goes when the record does", long.trimmed is False)
 
+
+# ==========================================================================
+# The working indicator and the reading order.
+#
+# Both are answers to "the panel is a column that cannot scroll itself": the
+# indicator says something is happening without a scroll, and newest-first puts
+# the live turn under the controls. `tools/working_probe.py` photographs the
+# motion; these checks cover the state behind it, which is where the phrases and
+# the clock are decided.
+# ==========================================================================
+print("\n-- the working indicator --")
+
+strip = conversation.Conversation()
+check("an idle conversation has no turn clock", strip.elapsed() == 0.0)
+check("and nothing to say about what it is doing", strip.busy_note() == "")
+
+strip.begin_turn("make it taller")
+check("a turn starts its clock", strip.turn_started is not None)
+check("waiting is what a silent request looks like", strip.busy_note() == "Waiting\u2026")
+check(
+    "the clock reads the moment it is given, not the wall clock",
+    strip.elapsed(strip.turn_started + 12.5) == 12.5,
+)
+check("and never a negative", strip.elapsed(strip.turn_started - 5.0) == 0.0)
+
+strip.apply_event({"ev": "reasoning", "chars": 80})
+check("a long think is named as thinking", strip.busy_note() == "Thinking\u2026")
+
+strip.apply_event({"ev": "delta", "text": "Hel"})
+check("text arriving is named as receiving", strip.busy_note() == "Receiving\u2026")
+
+# The bound is measured: at the default sidebar width, the 22-character
+# "Waiting for the model…" was photographed middle-clipped ("Waiting for the ...")
+# beside the arc and the clock, because Blender clips rather than wraps a label.
+NOTE_MAX = 14
+notes = {"Running code\u2026", "Receiving\u2026", "Thinking\u2026", "Waiting\u2026"}
+check("every phrase fits the width it was measured against", max(map(len, notes)) <= NOTE_MAX)
+check("and they are four distinct states", len(notes) == 4)
+
+strip.apply_event({"ev": "done", "finish_reason": "stop"})
+check("the phrase goes with the turn", strip.busy_note() == "")
+check("and so does the clock", strip.elapsed() == 0.0 and strip.turn_started is None)
+
+queued = conversation.Conversation()
+wire(queued, FakeSender())
+queued.begin_turn("do it")
+deliver(queued, calls=[wire_call("w1", "Do it", "pass")])
+check("a queued call is named as running code", queued.busy_note() == "Running code\u2026")
+check("even before its tick runs it", queued.running_tool is not None or bool(queued.pending))
+queued.cancel()
+
+# The sweeps are driven by the clock and never by events: during a model's think
+# there are no events at all, so a counter would freeze the indicator in exactly
+# the state it exists to announce.
+check("the arc starts at the start of its cycle", conversation.ring_sweep(0.0) == 0.0)
+check("and has gone round by the end of it", conversation.ring_sweep(conversation.RING_SECONDS) == 0.0)
+check(
+    "sweeping monotonically in between",
+    conversation.ring_sweep(0.1) < conversation.ring_sweep(0.5) < conversation.ring_sweep(1.0),
+)
+check(
+    "the bar goes there and back rather than nearly finishing",
+    conversation.bar_sweep(0.0) == 0.0
+    and conversation.bar_sweep(conversation.BAR_SECONDS / 2.0) == 1.0
+    and conversation.bar_sweep(conversation.BAR_SECONDS) == 0.0,
+)
+check(
+    "both stay inside the range a progress factor accepts",
+    all(
+        0.0 <= swathe(step / 40.0) <= 1.0
+        for swathe in (conversation.ring_sweep, conversation.bar_sweep)
+        for step in range(80)
+    ),
+)
+
+# ---------------------------------------------------------------- ordering
+print("\n-- the reading order --")
+
+ordered = conversation.Conversation()
+ordered.messages.extend(
+    [
+        conversation.Message("user", "first ask"),
+        conversation.Message("assistant", "first reply"),
+        conversation.Message("user", "second ask"),
+        conversation.Message("assistant", kind=conversation.KIND_CODE, purpose="Do it", detail="x = 1"),
+        conversation.Message("assistant", "second reply"),
+    ]
+)
+check(
+    "turns group a reply with the prompt that asked for it",
+    [len(turn) for turn in conversation.turns(ordered.messages)] == [2, 3],
+)
+chronological = ordered.visible_lines()
+newest_first = ordered.visible_lines(newest_first=True)
+check(
+    "chronological order puts the oldest turn first",
+    next(i for i, l in enumerate(chronological) if "first reply" in l)
+    < next(i for i, l in enumerate(chronological) if "second reply" in l),
+)
+check(
+    "newest-first puts the newest turn first",
+    next(i for i, l in enumerate(newest_first) if "second reply" in l)
+    < next(i for i, l in enumerate(newest_first) if "first reply" in l),
+)
+check(
+    "and neither order reverses the lines inside an exchange",
+    next(i for i, l in enumerate(newest_first) if "second ask" in l)
+    < next(i for i, l in enumerate(newest_first) if "code \u00b7" in l)
+    < next(i for i, l in enumerate(newest_first) if "second reply" in l),
+)
+check(
+    "so a prompt is never drawn below the answer it produced",
+    next(i for i, l in enumerate(newest_first) if "second ask" in l)
+    < next(i for i, l in enumerate(newest_first) if "second reply" in l),
+)
+check("both orders draw the same lines", sorted(chronological) == sorted(newest_first))
+
+# The truncation keeps the newest lines in either order, because a panel that
+# dropped the newest turn to save room would be hiding the answer.
+bulk = conversation.Conversation()
+for index in range(60):
+    bulk.messages.append(conversation.Message("user", f"ask {index}"))
+    bulk.messages.append(conversation.Message("assistant", f"reply {index}"))
+kept_chrono = bulk.visible_lines()
+kept_newest = bulk.visible_lines(newest_first=True)
+check("a long transcript is truncated", len(kept_chrono) <= conversation.VISIBLE_LINES + 1)
+check(
+    "chronological order drops the note at the top and keeps the newest",
+    kept_chrono[0].startswith("...") and "reply 59" in " ".join(kept_chrono),
+)
+check(
+    "newest-first keeps the newest too, and says so at the far end",
+    kept_newest[-1].startswith("...") and "reply 59" in " ".join(kept_newest),
+)
 
 # ==========================================================================
 # Which credential a request carries (decision 05, wired 2026-09-26).

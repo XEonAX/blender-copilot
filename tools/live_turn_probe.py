@@ -366,7 +366,7 @@ def main() -> int:
     # The real worker, deliberately NOT replaced: this is the whole point.
     session = bc.conversation.session
     session.clear()
-    state = {"step": 0, "turn_started": 0.0, "traces": 0, "ball": None}
+    state = {"step": 0, "turn_started": 0.0, "traces": 0, "ball": None, "strip": []}
 
     def send_turn(text: str) -> None:
         settings.prompt_text = text
@@ -384,6 +384,12 @@ def main() -> int:
         transport_error = session.transport_error
         check("the turn ended", not session.streaming and session.phase == "idle")
         check("with no transport error", not transport_error)
+        # The working strip is drawn whenever a turn is in flight, so a real turn
+        # that was sampled while in flight is evidence that a human watching this
+        # saw something moving. What the samples say is the report's business: the
+        # phases a real model goes through, which no scripted worker can answer.
+        check("the strip was drawn while the real turn ran", bool(state["strip"]))
+        note("strip timeline: " + " | ".join(state["strip"]))
         if transport_error:
             note(f"transport error: {transport_error}")
 
@@ -494,6 +500,17 @@ def main() -> int:
                     f"rows={len(session.messages)} "
                     f"drain_registered={bpy.app.timers.is_registered(bc.stream._tick)}"
                 )
+            # What the working strip says during a REAL turn, sampled rather than
+            # photographed: a screenshot cannot show motion, and this is the record
+            # of which phases a real model actually passes through. Also the reason
+            # the claim "the strip is alive while a turn runs" is measured here and
+            # not only with a scripted worker.
+            if state["traces"] % 20 == 0:
+                state["strip"].append(
+                    f"{session.phase}/{session.busy_note() or '(none)'}"
+                    f" {session.elapsed():.0f}s"
+                )
+                note(f"strip at {session.elapsed():.0f}s: {state['strip'][-1]}")
             if time.monotonic() - state["turn_started"] > TURN_DEADLINE:
                 note(f"last status: {session.status!r}")
                 FAILURES.append("the turn did not finish inside the deadline")

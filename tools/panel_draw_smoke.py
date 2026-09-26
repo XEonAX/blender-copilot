@@ -82,6 +82,14 @@ class StubLayout:
     def prop(self, data, name, **kwargs):
         self._log.append(("prop", name, ""))
 
+    def progress(self, factor=0.0, text="", type="BAR", **kwargs):
+        # The `type` argument is what distinguishes the two busy primitives: RING
+        # is the working strip's arc and BAR is the shine along the prompt editor,
+        # and a check that only counted "a progress bar was drawn" would pass with
+        # the wrong one in the wrong place.
+        self._log.append(("progress", type, f"{factor:.2f}"))
+        return self._child()
+
     def textbox(self, data, name, **kwargs):
         self._log.append(("textbox", name, ""))
 
@@ -184,7 +192,7 @@ def main() -> None:
             if name.startswith("_draw"):
                 setattr(instance, name, member.__get__(instance))
         context = fake_context()
-        settings = SimpleNamespace(layout_variant="boxes", prompt_text="")
+        settings = SimpleNamespace(layout_variant="boxes", prompt_text="", newest_first=True)
 
         # The live session starts EMPTY now that Send runs a real turn, so the
         # layout fixture is seeded here instead of by `register()`. One
@@ -205,45 +213,137 @@ def main() -> None:
         )
         assert conversation.session.last_receipt["changed"], conversation.session.last_receipt
 
+        # Every variant, both reading orders, both expander states. The order is in
+        # here because it is the one thing in the panel that a reader notices
+        # immediately and the stub *can* check: it records labels in the order the
+        # draw bodies emit them, which is exactly the order Blender would paint.
+        #
+        # The anchors are the three NEWEST prompts, newest first, rather than the
+        # whole transcript's ends, and each is short enough to survive wrapping -
+        # a whole sentence is split across two labels at this measure, so an anchor
+        # containing one would only ever match in the variant that does not wrap.
+        # The flat-log variant also keeps only the newest `VISIBLE_LINES`, so an
+        # assertion pinned to the oldest prompt would be an assertion about a line
+        # that variant deliberately dropped. Every anchor that *is* drawn must still
+        # be in the order asked for, and at least two of the three always are.
+        ANCHORS = (
+            "Now give it a red material",
+            "Make the cube taller.",
+            "What is selected right now?",
+        )
         for variant in ("log", "boxes", "external"):
-            for expanded in (False, True):
-                for message in conversation.session.messages:
-                    message.expanded = expanded
-                log: list = []
-                layout = StubLayout(log)
-                # The stub context has no `region`, so wrap_budget falls back to
-                # the fixed measure - which is the point: this proves the draw
-                # bodies RUN, not that they fit. Fitting is checked by
-                # long_labels/longest_label below and, ultimately, by an eye.
-                wrap = panel.wrap_budget(context)
-                if variant == "log":
-                    instance._draw_log(layout, context)
-                elif variant == "external":
-                    instance._draw_external(layout, context)
-                else:
-                    instance._draw_boxes(layout, context, wrap)
-                instance._draw_header(layout, context)
-                instance._draw_transport(layout, wrap)
-                instance._draw_receipt(layout, wrap)
-                instance._draw_input(layout, context, settings)
-                instance._draw_actions(layout, context, wrap)
-                instance._draw_coverage(layout, wrap)
-                instance._draw_variant_picker(layout, settings)
-                worst = long_labels(log)
-                longest = longest_label(log)
-                print(
-                    f"ok   variant={variant:8s} expanded={expanded!s:5s} "
-                    f"widgets={len(log)} boxes={log.count('box')} "
-                    f"longest_label={longest}"
-                )
-                # Advisory and deliberately blunt: only gross overflow is caught,
-                # and the bare-column case above slips past it entirely. Absence
-                # of a line here is NOT evidence that the text fits.
-                for length, kind, text in worst[:4]:
+            for newest_first in (True, False):
+                for expanded in (False, True):
+                    for message in conversation.session.messages:
+                        message.expanded = expanded
+                    settings.newest_first = newest_first
+                    log: list = []
+                    layout = StubLayout(log)
+                    # The stub context has no `region`, so wrap_budget falls back to
+                    # the fixed measure - which is the point: this proves the draw
+                    # bodies RUN, not that they fit. Fitting is checked by
+                    # long_labels/longest_label below and, ultimately, by an eye.
+                    wrap = panel.wrap_budget(context)
+                    if variant == "log":
+                        instance._draw_log(layout, context, newest_first)
+                    elif variant == "external":
+                        instance._draw_external(layout, context)
+                    else:
+                        instance._draw_boxes(layout, context, wrap, newest_first)
+                    instance._draw_header(layout, context)
+                    instance._draw_working(layout, context)
+                    instance._draw_transport(layout, wrap)
+                    instance._draw_receipt(layout, wrap)
+                    instance._draw_input(layout, context, settings)
+                    instance._draw_actions(layout, context, wrap)
+                    instance._draw_coverage(layout, wrap)
+                    instance._draw_variant_picker(layout, settings)
+                    worst = long_labels(log)
+                    longest = longest_label(log)
                     print(
-                        f"     !! {length} chars will likely be clipped "
-                        f"({kind}): {text!r}"
+                        f"ok   variant={variant:8s} newest_first={newest_first!s:5s} "
+                        f"expanded={expanded!s:5s} widgets={len(log)} "
+                        f"boxes={log.count('box')} longest_label={longest}"
                     )
+                    # Advisorily and deliberately blunt: only gross overflow is
+                    # caught, and the bare-column case above slips past it entirely.
+                    # Absence of a line here is NOT evidence that the text fits.
+                    for length, kind, text in worst[:4]:
+                        print(
+                            f"     !! {length} chars will likely be clipped "
+                            f"({kind}): {text!r}"
+                        )
+
+                    if variant == "external":
+                        continue
+                    drawn = [entry[1] for entry in log if entry[0] == "label"]
+                    if variant == "log":
+                        # The flat-log variant is a faithful renderer of one list, so
+                        # that is what is checked: exactly the lines it was handed, in
+                        # the order it was handed them. Which end of that list is
+                        # newest is `visible_lines`' decision, and the CPython suite
+                        # checks it there - without a GUI, where the truncation is
+                        # explicit. Anchoring on prompt text here instead would fail
+                        # whenever the truncation (or an expanded traceback) happened
+                        # to drop the anchor, and a check that quietly skips is worse
+                        # than one that checks nothing.
+                        lines = conversation.session.visible_lines(
+                            newest_first=newest_first
+                        )
+                        assert drawn[: len(lines)] == lines, (
+                            newest_first,
+                            drawn[:4],
+                            lines[:4],
+                        )
+                        continue
+
+                    def at(needle):
+                        return next(
+                            (i for i, text in enumerate(drawn) if needle in text), None
+                        )
+
+                    found = [(needle, at(needle)) for needle in ANCHORS]
+                    found = [(needle, index) for needle, index in found if index is not None]
+                    assert len(found) >= 2, (variant, drawn)
+                    order = [index for _, index in found]
+                    if newest_first:
+                        assert order == sorted(order), (variant, found)
+                    else:
+                        assert order == sorted(order, reverse=True), (variant, found)
+        print(
+            "ok   newest-first puts the live turn first, and chronological order is "
+            "still available"
+        )
+
+        # The working strip and the shine: nothing is drawn for either when idle,
+        # and both appear while a turn is in flight. Both halves, because a block
+        # that only ever draws is as broken as one that never does.
+        log = []
+        instance._draw_working(StubLayout(log), context)
+        assert log == [], log
+        log = []
+        instance._draw_input(StubLayout(log), context, settings)
+        assert not [e for e in log if e[0] == "progress"], log
+        print("ok   no ring and no shine while idle")
+
+        conversation.session.begin_turn("look busy for a moment")
+        try:
+            log = []
+            instance._draw_working(StubLayout(log), context)
+            rings = [e for e in log if e[0] == "progress"]
+            assert rings and rings[0][1] == "RING", log
+            assert ("label", conversation.session.busy_note(), "") in log, log
+            log = []
+            instance._draw_input(StubLayout(log), context, settings)
+            bars = [e for e in log if e[0] == "progress"]
+            assert bars and bars[0][1] == "BAR", log
+            assert ("textbox", "prompt_text", "") in log, log
+        finally:
+            conversation.session.cancel()
+        print(
+            "ok   the ring and the shine are drawn while a turn is in flight, and "
+            "the prompt editor is still there"
+        )
 
         # The transport failure block, which draws nothing when there is no
         # failure - both halves, because a block that only ever draws is as
@@ -268,7 +368,7 @@ def main() -> None:
         # turned to. The icons are the stub's record of what the panel said about
         # each state - ERROR and TIME are its own vocabulary for the two.
         log = []
-        instance._draw_boxes(StubLayout(log), context, panel.wrap_budget(context))
+        instance._draw_boxes(StubLayout(log), context, panel.wrap_budget(context), True)
         icons = {entry[2] for entry in log if entry[0] == "label"}
         assert "ERROR" in icons, log
         assert "TIME" in icons, log
@@ -300,7 +400,7 @@ def main() -> None:
         joined = " ".join(entry[1] for entry in log if entry[0] == "label")
         assert all(line in joined for line in budget.RUNNING_LINES), joined
         assert f"{budget.CALL_SECONDS:.0f}s per call" in joined, joined
-        assert f"{budget.TURN_SECONDS:.0f}s per turn" in joined, joined
+        assert f"{budget.TURN_SECONDS:.0f}s of code per turn" in joined, joined
         assert "stops at the budget" in joined, joined
         assert "only stops once it returns" in joined, joined
         assert "cannot be delivered" in joined, joined
@@ -362,7 +462,7 @@ def main() -> None:
         )
         assert conversation.session.messages[-1].text.startswith(budget.MARK_STOPPED)
         log = []
-        instance._draw_boxes(StubLayout(log), context, panel.wrap_budget(context))
+        instance._draw_boxes(StubLayout(log), context, panel.wrap_budget(context), True)
         drawn = " ".join(entry[1] for entry in log if entry[0] == "label")
         assert "ran past its budget" in drawn, drawn
         assert "3.2s" in drawn, drawn

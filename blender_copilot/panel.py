@@ -193,6 +193,16 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
         default="boxes",
     )
 
+    newest_first: bpy.props.BoolProperty(
+        name="Newest turn first",
+        description=(
+            "Draw the newest turn directly under the controls instead of at the end "
+            "of the transcript. A panel cannot scroll itself, so with this off the "
+            "live turn is always a scroll away"
+        ),
+        default=True,
+    )
+
     # Ticket 14 §1's lever, and the only setting that reads the budget. 0 ships,
     # because the derivation is now the better answer: it is sized from the
     # provider's own window rather than from the 32k floor the design assumed. The
@@ -583,32 +593,88 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         # every piece of prose below: transcript, receipt and coverage all wrap
         # to the same measure, so a resized sidebar changes all of them together.
         budget = wrap_budget(context)
+        # Which end of the transcript the newest turn is drawn at. Newest-first
+        # ships because a Panel cannot scroll itself: with the controls pinned
+        # above the transcript, everything *new* used to be at the far end of an
+        # unbounded column, so the answer to "has anything happened?" was a scroll
+        # away. Reversing the turns puts the live turn immediately under the
+        # controls. Kept switchable because it is a reading-order change and the
+        # person who has to live with it should be able to flip it without an edit.
+        newest_first = bool(getattr(settings, "newest_first", True))
+
         self._draw_header(layout, context)
+        self._draw_working(layout, context)
         self._draw_transport(layout, budget)
         self._draw_input(layout, context, settings)
         self._draw_actions(layout, context, budget)
 
+        # The receipt describes the NEWEST turn, so it is drawn at whichever end
+        # that turn is. It used to sit unconditionally after the transcript, which
+        # in newest-first order would strand it at the bottom of an unbounded
+        # column - a receipt nobody scrolls to read.
+        if newest_first:
+            self._draw_receipt(layout, budget)
+
         variant = settings.layout_variant
         if variant == "log":
-            self._draw_log(layout, context)
+            self._draw_log(layout, context, newest_first)
         elif variant == "external":
             self._draw_external(layout, context)
         else:
-            self._draw_boxes(layout, context, budget)
+            self._draw_boxes(layout, context, budget, newest_first)
 
-        # Drawing the receipt straight after the transcript IS "under the
-        # streaming reply": it belongs to the turn it describes rather than
-        # standing above the input, which is what the visual pass reversed.
-        self._draw_receipt(layout, budget)
+        # In chronological order, "under the streaming reply" is where this
+        # belongs: straight after the transcript, because the transcript ends with
+        # the turn the receipt describes.
+        if not newest_first:
+            self._draw_receipt(layout, budget)
         self._draw_coverage(layout, budget)
         self._draw_history(layout, budget)
         self._draw_variant_picker(layout, settings)
 
     # -- chrome --------------------------------------------------------------
+    def _draw_working(self, layout, context):
+        """The "it is working" strip: an arc, what it is doing, and for how long.
+
+        Drawn only while a turn is in flight, and directly under the header rather
+        than beside the transcript, because it has to be visible when the answer is
+        not. A Panel cannot scroll itself, so the end of an unbounded transcript can
+        be an arbitrary distance below the fold - and "is it working or has it
+        died?" must not cost a scroll to answer.
+
+        The arc is `progress(type="RING")`, Blender's own busy primitive, driven by
+        the **wall clock** (`conversation.ring_sweep`): a frame counted per event
+        would freeze during a long think, which is exactly the state this exists to
+        announce. `stream._tick` keeps repainting while the turn is in flight, which
+        is what turns the changing factor into visible motion.
+
+        The words come from `Conversation.busy_note` and the clock from
+        `Conversation.elapsed`, in the module the CPython suite can disagree with -
+        so the strip cannot drift from the state it claims to describe.
+        """
+        session = conversation.session
+        if not session.streaming:
+            return
+        # A fixed-height strip: the arc, the phrase, the clock. The phrase is
+        # short and the clock is its own label because Blender middle-clips a
+        # label that does not fit, and a clipped "Waiti...g for the model" is
+        # worse than a shorter sentence.
+        box = layout.box()
+        row = box.row(align=True)
+        row.progress(factor=conversation.ring_sweep(), type="RING")
+        row.label(text=session.busy_note())
+        row.label(text=f"{session.elapsed():.0f}s")
+
     def _draw_header(self, layout, context):
         row = layout.row(align=True)
         row.label(text="prototype", icon="INFO")
-        row.label(text=conversation.session.status)
+        # The status word moves to the working strip while a turn is in flight, and
+        # only then: measured on screen, the header read "waiting…" directly above
+        # a strip reading "Waiting… 1s", which is the same fact twice and one more
+        # place for the two to disagree. It stays here for every other state, where
+        # the strip is not drawn at all.
+        if not conversation.session.streaming:
+            row.label(text=conversation.session.status)
 
         # Which conversation this is, in the header because it is a property of
         # the whole session rather than of the transcript below - and because
@@ -703,12 +769,28 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
                 box.label(text=chunk)
 
     def _draw_input(self, layout, context, settings):
-        layout.textbox(
+        """The prompt editor, and the shine that says it is busy.
+
+        VS Code Copilot animates a gradient around its prompt box while a request
+        is in flight. A Panel cannot colour or animate a *border* - `layout.alert`
+        is the only outline and it is red, which would read as an error - so the
+        nearest honest thing is drawn at the editor's own edge: a `progress` bar
+        inside the same box, whose fill travels, and only while a turn is in
+        flight. `BAR` rather than `RING` because its job is to sit along that edge.
+
+        `conversation.bar_sweep` bounces there and back instead of sweeping: a
+        sawtooth fill reads as a progress bar that keeps *nearly* finishing, which
+        is a claim about a request's end that nothing here can make.
+        """
+        box = layout.box()
+        box.textbox(
             settings,
             "prompt_text",
             initial_visible_lines=3,
             placeholder="Ask Blender...",
         )
+        if conversation.session.streaming:
+            box.progress(factor=conversation.bar_sweep(), type="BAR")
 
     def _draw_actions(self, layout, context, wrap_chars):
         session = conversation.session
@@ -786,9 +868,9 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         box.prop(settings, "layout_variant", text="")
 
     # -- variant: flat log ---------------------------------------------------
-    def _draw_log(self, layout, context):
+    def _draw_log(self, layout, context, newest_first):
         box = layout.box()
-        lines = conversation.session.visible_lines()
+        lines = conversation.session.visible_lines(newest_first=newest_first)
         if lines:
             for line in lines:
                 box.label(text=line)
@@ -805,29 +887,48 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         box.label(text=f'Code: "{conversation.CODE_TEXT}"')
 
     # -- variant: role boxes (chosen) ---------------------------------------
-    def _draw_boxes(self, layout, context, budget):
+    def _draw_boxes(self, layout, context, budget, newest_first):
         # No pager, and none left to switch back to. The human visual pass of
         # 2026-09-26 rejected bounded pages in favour of emitting everything and
         # letting the sidebar REGION scroll - the panel cannot scroll itself, but
         # the region it lives in can. So the whole transcript renders here.
+        #
+        # The order is `newest_first`'s: the newest turn is drawn first, so the live
+        # one sits directly under the controls. Only the *turns* are reversed -
+        # `conversation.turns` keeps each turn's own lines in reading order, because
+        # a reply drawn above the prompt it answers is an answer to the wrong
+        # question.
         messages = conversation.session.messages
         index_of = {id(message): i for i, message in enumerate(messages)}
-        for turn in _turns(messages):
+        grouped = conversation.turns(messages)
+        for turn in reversed(grouped) if newest_first else grouped:
             self._draw_turn(layout, turn, index_of, budget)
 
     def _draw_turn(self, layout, turn, index_of, budget):
-        """A user turn is a labelled block; an assistant turn is one bordered
-        box holding its whole reply - prose, code and tool calls together."""
-        first = turn[0]
-        if first.kind == conversation.KIND_USER:
+        """One exchange: the prompt as a labelled line, then its reply in one box.
+
+        An exchange is one unit (see `conversation.turns`), so the two halves are
+        drawn here rather than in two passes - which is what makes the newest-first
+        order legible: reversing the exchanges moves a prompt and its answer
+        together, and never puts the answer above the question.
+
+        A group that does not start with a prompt is a reply with nothing above it
+        (a cleared session, or a conversation read back), and it is drawn as a box
+        on its own.
+        """
+        if turn[0].kind == conversation.KIND_USER:
             layout.label(text="You", icon="USER")
-            for chunk in conversation.wrap(first.text, budget):
+            for chunk in conversation.wrap(turn[0].text, budget):
                 layout.label(text=chunk)
             layout.separator(factor=0.4)
-            return
+            parts = turn[1:]
+        else:
+            parts = turn
 
+        if not parts:
+            return
         turn_box = layout.box()
-        for message in turn:
+        for message in parts:
             self._draw_part(turn_box, message, index_of.get(id(message), -1), budget)
 
     def _draw_part(self, layout, message, index, budget):
@@ -941,17 +1042,3 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         if message.expanded:
             for line in conversation.gutter(message.detail):
                 box.label(text=line)
-
-
-def _turns(messages):
-    """Group the transcript into turns: a user message starts one, assistant
-    parts join."""
-    turns = []
-    for message in messages:
-        if message.kind == conversation.KIND_USER or not turns:
-            turns.append([message])
-        elif turns[-1][0].role == "assistant":
-            turns[-1].append(message)
-        else:
-            turns.append([message])
-    return turns

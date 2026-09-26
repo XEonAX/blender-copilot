@@ -39,6 +39,7 @@ import importlib.util
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 
@@ -142,6 +143,46 @@ FAIL_STREAK_LIMIT = 3
 # characters, so a long think does not repaint the sidebar once per token.
 REASONING_NOTCH = 40
 
+# ---------------------------------------------------------------------------
+# The working indicator
+#
+# A turn can sit inside a single request for a minute, and a sidebar with no
+# moving part looks exactly like a sidebar that has died - the user cannot tell
+# "still thinking" from "stuck", which is the one question this pair of functions
+# exists to answer. Ticket 16 measured the reason it matters: thinking arrives for
+# many seconds before the first visible character.
+#
+# Both are driven by the **wall clock** rather than by a count of events. A counter
+# would advance one step per event, and during a long think there are no events at
+# all, so the indicator would freeze in precisely the state it exists to announce.
+# Both take `now`, so a check moves time rather than sleeping.
+#
+# `RING`/`BAR` are the two values of `UILayout.progress`'s `type` enum, read from
+# the installed 5.2.2's RNA rather than remembered, and it is Blender's own busy
+# primitive: an arc and a bar. The ring is native rather than a spinning glyph -
+# VS Code animates a Braille character because a terminal has nothing better, and
+# a text glyph here would be a bet on a font this add-on does not control.
+RING_SECONDS = 1.2   # one full turn of the arc
+BAR_SECONDS = 1.6    # one there-and-back of the bar
+
+
+def ring_sweep(now: float | None = None) -> float:
+    """0->1 sawtooth: the arc fills, then starts again - rotation with no end."""
+    moment = time.monotonic() if now is None else now
+    return (moment % RING_SECONDS) / RING_SECONDS
+
+
+def bar_sweep(now: float | None = None) -> float:
+    """0->1->0 triangle, for the shine along the prompt editor.
+
+    A sawtooth there would read as a progress bar that keeps *nearly* finishing,
+    which is a claim about the request's end that nobody can make. There and back
+    has no such reading: it is the standard indeterminate motion.
+    """
+    moment = time.monotonic() if now is None else now
+    phase = (moment % BAR_SECONDS) / BAR_SECONDS
+    return 1.0 - abs(2.0 * phase - 1.0)
+
 # Ticket 09 §6: one redaction boundary, applied where text becomes visible, so
 # no error path and no crash report can leak a key into the transcript.
 _KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
@@ -209,6 +250,32 @@ def wrap(text: str, width: int = WRAP_CHARS) -> list[str]:
 def gutter(text: str, prefix: str = "  ") -> list[str]:
     """Detail bodies (code, tool output, traceback) get a plain-text inset."""
     return [f"{prefix}{line}" for line in text.splitlines()]
+
+
+def turns(messages) -> list[list[Message]]:
+    """Group the transcript into exchanges: a user message starts one, and
+    everything the agent did about it joins - the reply, its code rows, its tool
+    rows, any note.
+
+    That is the same unit the rest of the system already calls a turn: the undoS
+    side's "one step per agent turn" (ticket 12), the span the projection protects
+    (I4), and the reason `begin_turn` opens a clock. Rendering it as anything else
+    is how the panel and the semantics would drift apart.
+
+    It also has to be this grouping for the newest-first order to read: with each
+    reply as its own group, reversing the list drew the answer *above* the question
+    it answered - measured on screen, in `tools/working_probe.py`'s first picture.
+
+    A transcript may open with a reply that had no prompt (a cleared session, or a
+    conversation read back from the store), and that reply is a group of its own.
+    """
+    grouped: list[list[Message]] = []
+    for message in messages:
+        if message.kind == KIND_USER or not grouped:
+            grouped.append([message])
+        else:
+            grouped[-1].append(message)
+    return grouped
 
 
 def _plain_arguments(call: dict) -> dict | None:
@@ -455,6 +522,10 @@ class Conversation:
         # only moves the status between "waiting" and "thinking".
         self.reasoning_chars = 0
         self._reasoning_notch = 0
+        # When the current turn opened, for the working indicator's clock, or None
+        # while no turn is in flight. Monotonic, and never written to the store: it
+        # is a fact about this session's patience, not about the conversation.
+        self.turn_started: float | None = None
         # Set only when the transport cannot run at all - no key, no worker.
         # A *turn* failure (401, 429, a dropped stream) is a transcript block
         # instead, because sending again is a real option there.
@@ -478,9 +549,24 @@ class Conversation:
         return len(message.detail.splitlines()) or 1
 
     def _log_block(self, message: Message) -> list[str]:
-        """The flat, prefix-only rendering. Also the paging cost estimate."""
+        """The flat, prefix-only rendering. Also the paging cost estimate.
+
+        Every *prose* line here is wrapped, exactly as the boxed layout wraps it.
+        The three branches that used to emit one long label - error, note and the
+        tool row's purpose - were measured by `tools/panel_draw_smoke.py` at 92 and
+        125 characters against this layout's own 38-character measure, and a label
+        that does not fit is **middle-clipped** by Blender, not wrapped: the trim
+        note shipped in this variant reading "| \u2702 context trimmed \u2014 model
+        saw 3 to\u2026". A tool purpose can be 80 characters by contract
+        (`execution.PURPOSE_MAX`), so that row was clipped by construction.
+
+        The `gutter` bodies are deliberately left alone: they are code, a
+        traceback and JSON, and re-flowing a code line to the sidebar's width
+        changes the thing being shown. The boxed layout wraps them; this variant
+        does not, and that difference is now the only one left between the two.
+        """
         if message.kind == KIND_CODE:
-            lines = [f"| code · {self._line_count(message)} lines"]
+            lines = [f"| code \u00b7 {self._line_count(message)} lines"]
             if message.expanded:
                 lines += gutter(message.detail)
             return lines
@@ -490,17 +576,18 @@ class Conversation:
                 STATUS_OK: "+",
                 STATUS_ERROR: "x",
             }.get(message.status, "?")
-            lines = [f"| {mark} {message.purpose or message.text}"]
+            text = message.purpose or message.text
+            lines = [f"| {mark} {chunk}" for chunk in wrap(text, WRAP_CHARS - 4)]
             if message.expanded and message.detail:
                 lines += gutter(message.detail)
             return lines
         if message.kind == KIND_ERROR:
-            lines = [f"| ! {message.text}"]
+            lines = [f"| ! {chunk}" for chunk in wrap(message.text, WRAP_CHARS - 4)]
             if message.expanded and message.detail:
                 lines += gutter(message.detail)
             return lines
         if message.kind == KIND_NOTE:
-            lines = [f"| {message.text}"]
+            lines = [f"| {chunk}" for chunk in wrap(message.text, WRAP_CHARS - 2)]
             if message.expanded and message.detail:
                 lines += gutter(message.detail)
             return lines
@@ -508,15 +595,33 @@ class Conversation:
         width = WRAP_CHARS if prefix == ">" else WRAP_CHARS - 2
         return [f"{prefix} {chunk}" for chunk in wrap(message.text, width)]
 
-    def visible_lines(self) -> list[str]:
-        """Log-variant transcript: oldest first, truncated at the old end."""
-        lines: list[str] = []
-        for message in self.messages:
-            lines.extend(self._log_block(message))
-            lines.append("")
+    def visible_lines(self, newest_first: bool = False) -> list[str]:
+        """Log-variant transcript, truncated at the old end.
+
+        `newest_first` reverses the order of **turns**, never the lines inside one:
+        a reply drawn above the prompt it answers would read as an answer to the
+        wrong question, and a code row above the purpose that explains it is the
+        same mistake in miniature.
+
+        The truncation keeps the newest lines in both orders, so what is dropped is
+        always the oldest - and the note that says so sits at the far end from where
+        the reader starts, which is where the missing text would have been.
+        """
+        blocks: list[list[str]] = []
+        for turn in turns(self.messages):
+            block: list[str] = []
+            for message in turn:
+                block.extend(self._log_block(message))
+            block.append("")
+            blocks.append(block)
+        if newest_first:
+            blocks.reverse()
+        lines = [line for block in blocks for line in block]
         if len(lines) > VISIBLE_LINES:
             dropped = len(lines) - VISIBLE_LINES
-            lines = [f"... {dropped} earlier lines dropped"] + lines[-VISIBLE_LINES:]
+            note = f"... {dropped} older lines dropped"
+            kept = lines[:VISIBLE_LINES] if newest_first else lines[-VISIBLE_LINES:]
+            lines = kept + [note] if newest_first else [note] + kept
         return lines
 
     # -- rendering: full export ---------------------------------------------
@@ -546,6 +651,43 @@ class Conversation:
         return "\n".join(chunks)
 
     # -- status --------------------------------------------------------------
+    def elapsed(self, now: float | None = None) -> float:
+        """Seconds since this turn opened, or 0.0 when none is in flight.
+
+        The clock is the answer to "is it stuck?" that a spinner alone cannot
+        give: motion says something is happening, and the number says for how long.
+        `now` is injectable so a check reads exact seconds instead of sleeping.
+        """
+        if self.turn_started is None:
+            return 0.0
+        moment = time.monotonic() if now is None else now
+        return max(0.0, moment - self.turn_started)
+
+    def busy_note(self) -> str:
+        """What the turn is doing right now, in a phrase short enough to fit.
+
+        **Measured, not guessed.** `tools/working_probe.py` photographed the strip at
+        the default sidebar width, and "Waiting for the model…" (22 characters)
+        next to the arc and the clock came back middle-clipped by Blender: the row
+        showed "Waiting for the ...". Blender clips a label that does not fit
+        instead of wrapping it, so every phrase here is kept to 14 characters - and
+        the CPython suite pins that bound, because the failure is invisible to any
+        check that only counts widgets. The strip is a status, not a sentence: the
+        clock beside it says how long and the Stop button under it says what you can
+        do about it.
+
+        The running call is checked first, and it is the one case with teeth: while
+        `bpy` is executing, Blender does not pump events and Stop cannot be
+        delivered, so "Running code…" is not decoration.
+        """
+        if self.running_tool is not None or self.phase == PHASE_TOOL:
+            return "Running code\u2026"
+        if self.streaming:
+            if self._reply_text():
+                return "Receiving\u2026"
+            return "Thinking\u2026" if self.reasoning_chars else "Waiting\u2026"
+        return ""
+
     @property
     def status(self) -> str:
         # Deliberately terse: the header row shares the sidebar's width with the
@@ -629,6 +771,7 @@ class Conversation:
         self.busy_kind = BUSY_STREAM
         self.reasoning_chars = 0
         self._reasoning_notch = 0
+        self.turn_started = time.monotonic()
         self._rows = {}
         self.pending = []
         self._rounds = 1
@@ -1179,6 +1322,10 @@ class Conversation:
             self.busy_kind = None
             self.pending = []
             self._round_open = False
+            # The clock stops with the turn: a stale elapsed time left on screen
+            # would say a finished turn is still running, which is the same false
+            # signal the indicator exists to remove.
+            self.turn_started = None
             # No turn in flight, so there is nothing to protect: the next request
             # protects the newest turn instead, which is the same answer
             # `store.prune` gives about what may be dropped.

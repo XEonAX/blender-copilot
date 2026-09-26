@@ -91,7 +91,10 @@ KIND_TURN = "turn"
 #   * Stop is not delivered while the code runs (the main thread is the code);
 #   * a raise can be swallowed, and the timer can be switched off.
 RUNNING_LINES = (
-    f"Budget: {CALL_SECONDS:.0f}s per call, {TURN_SECONDS:.0f}s per turn.",
+    # "of code" is not padding: the turn's figure is the sum of the call windows,
+    # and the reading it replaced - "60s per turn" meaning the whole turn, thinking
+    # included - is what a live run was refused under.
+    f"Budget: {CALL_SECONDS:.0f}s per call, {TURN_SECONDS:.0f}s of code per turn.",
     "A Python loop, a sleep or a blocked read stops at the budget.",
     "A single Blender or NumPy call only stops once it returns.",
     "Stop cannot be delivered while the call is running.",
@@ -117,8 +120,19 @@ class Exceeded(BaseException):
     """
 
     def __init__(self, kind: str, seconds: float, limit: float, interrupts: int = 1):
+        # `limit` is ≤ 0 for a call refused *at the door* - the turn has already
+        # overspent, so there was no budget to arm - and that sign is load-bearing:
+        # `_record`'s `late` rule reads it as "the alarm was never armed, so no
+        # interrupt can have been delivered late". It is not, however, fit to print.
+        # A live run (`tools/live_turn_probe.py`, 2026-09-26) produced the sentence
+        # "the turn budget is used up: 7.27s of -7.27s" - in the panel and in the
+        # model's own tool result - which tells a reader nothing and a model less.
+        # The number is real, the pairing was not: when there is no budget left, the
+        # honest sentence says so and gives the overspend.
         super().__init__(
             f"the {kind} budget is used up: {seconds:.2f}s of {limit:.2f}s"
+            if limit > 0
+            else f"the {kind} budget is already spent (overspent by {seconds:.2f}s)"
         )
         self.kind = kind
         self.seconds = seconds
@@ -167,6 +181,9 @@ class Limits:
         self.poll = float(poll)
         self._clock = clock or time.monotonic
         self._turn_started: float | None = None
+        # Seconds of *code* run so far this turn - the sum of the call windows, not
+        # the wall clock since the turn opened. See `turn_elapsed`.
+        self._turn_used = 0.0
         self._call_started: float | None = None
         self._armed = False
         self._previous = None
@@ -182,20 +199,35 @@ class Limits:
 
     @property
     def turn_elapsed(self) -> float:
-        if self._turn_started is None:
-            return 0.0
-        return self._clock() - self._turn_started
+        """Seconds this turn has spent **running code**, and nothing else.
+
+        Wall clock from the turn's own start was the first implementation, and it
+        was wrong: it charged the model's *thinking* - and every HTTP round trip -
+        against a budget whose whole purpose is to bound model-authored code. Two
+        live runs proved the difference rather than the principle
+        (`tools/live_turn_probe.py`, 2026-09-26): 67 s and 79 s turns whose code
+        added up to a few seconds were refused the call that would have finished the
+        job, so the acceptance sentence failed twice with a half-built object, and
+        the refusal sentence ("this turn's budget for running code is used up") was
+        describing something that had not happened. The figure this module documents
+        is "60 s cumulative per user turn" of the seconds the *alarm* can see - "60 s
+        bounds a turn made of several such calls" (this file's header, transcribing
+        ticket 17 §4) - so the accumulator is the call windows and the clock between
+        them is not part of it.
+        """
+        return self._turn_used
 
     def begin_turn(self) -> bool:
-        """A turn starts: its clock runs from here, across every call in it."""
+        """A turn starts: its ledger opens. Only code time is added to it."""
         self._turn_started = self._clock()
+        self._turn_used = 0.0
         self.interrupts = 0
         self._verdict = {}
         return True
 
     def end_turn(self) -> bool:
         """A turn is over. The last verdict is *kept* - it is what the panel's
-        receipt and the stop note are built from - and only the clock stops."""
+        receipt and the stop note are built from - and only the ledger closes."""
         self._turn_started = None
         return True
 
@@ -264,6 +296,13 @@ class Limits:
                     signal.signal(signal.SIGALRM, self._previous)
                 except Exception:  # noqa: BLE001 - same: never raise from here
                     pass
+        # The turn's ledger, before the verdict erases the call's start. Charged on
+        # every path out of the call - returned, raised, interrupted, disarmed -
+        # because the seconds were spent either way, and a turn that only counted
+        # the calls it finished cleanly would be a turn that could outlast its own
+        # budget by dying repeatedly.
+        if self._call_started is not None:
+            self._turn_used += max(0.0, self._clock() - self._call_started)
         self._record(exc if isinstance(exc, Exceeded) else None, armed=was_armed, disarmed=disarmed)
         self._call_started = None
 
