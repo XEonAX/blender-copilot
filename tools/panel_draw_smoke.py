@@ -315,16 +315,16 @@ def main() -> None:
             "still available"
         )
 
-        # The working strip and the shine: nothing is drawn for either when idle,
-        # and both appear while a turn is in flight. Both halves, because a block
-        # that only ever draws is as broken as one that never does.
+        # The working indicator: nothing is drawn when idle, and the arc appears
+        # while a turn is in flight. Both halves, because a block that only ever
+        # draws is as broken as one that never does.
         log = []
         instance._draw_working(StubLayout(log), context)
         assert log == [], log
         log = []
         instance._draw_input(StubLayout(log), context, settings)
         assert not [e for e in log if e[0] == "progress"], log
-        print("ok   no ring and no shine while idle")
+        print("ok   no indicator while idle")
 
         conversation.session.begin_turn("look busy for a moment")
         try:
@@ -332,17 +332,19 @@ def main() -> None:
             instance._draw_working(StubLayout(log), context)
             rings = [e for e in log if e[0] == "progress"]
             assert rings and rings[0][1] == "RING", log
+            assert len(rings) == 1, log
             assert ("label", conversation.session.busy_note(), "") in log, log
             log = []
             instance._draw_input(StubLayout(log), context, settings)
-            bars = [e for e in log if e[0] == "progress"]
-            assert bars and bars[0][1] == "BAR", log
             assert ("textbox", "prompt_text", "") in log, log
+            # One indicator, pinned: a second one along the editor was built and
+            # removed, and a check that only counted progress bars would have been
+            # happy with it in either place.
+            assert not [e for e in log if e[0] == "progress"], log
         finally:
             conversation.session.cancel()
         print(
-            "ok   the ring and the shine are drawn while a turn is in flight, and "
-            "the prompt editor is still there"
+            "ok   one arc carries the busy state, the prompt editor stays an editor"
         )
 
         # The transport failure block, which draws nothing when there is no

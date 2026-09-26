@@ -2100,18 +2100,17 @@ check(
     conversation.ring_sweep(0.1) < conversation.ring_sweep(0.5) < conversation.ring_sweep(1.0),
 )
 check(
-    "the bar goes there and back rather than nearly finishing",
-    conversation.bar_sweep(0.0) == 0.0
-    and conversation.bar_sweep(conversation.BAR_SECONDS / 2.0) == 1.0
-    and conversation.bar_sweep(conversation.BAR_SECONDS) == 0.0,
+    "and staying inside the range a progress factor accepts",
+    all(0.0 <= conversation.ring_sweep(step / 40.0) <= 1.0 for step in range(80)),
 )
+# There was a second indicator here - a linear bar along the prompt editor,
+# standing in for VS Code's travelling shine - and it was removed: a fill is the
+# definite shape and the arc is the indefinite one, so the two disagreed about one
+# turn. Its sweep went with it, because a mechanism nobody draws is a mechanism the
+# next reader has to work out is dead.
 check(
-    "both stay inside the range a progress factor accepts",
-    all(
-        0.0 <= swathe(step / 40.0) <= 1.0
-        for swathe in (conversation.ring_sweep, conversation.bar_sweep)
-        for step in range(80)
-    ),
+    "the panel keeps one indicator, and its sweep with it",
+    not hasattr(conversation, "bar_sweep") and not hasattr(conversation, "BAR_SECONDS"),
 )
 
 # ---------------------------------------------------------------- ordering

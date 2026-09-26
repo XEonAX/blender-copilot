@@ -157,31 +157,24 @@ REASONING_NOTCH = 40
 # all, so the indicator would freeze in precisely the state it exists to announce.
 # Both take `now`, so a check moves time rather than sleeping.
 #
-# `RING`/`BAR` are the two values of `UILayout.progress`'s `type` enum, read from
-# the installed 5.2.2's RNA rather than remembered, and it is Blender's own busy
-# primitive: an arc and a bar. The ring is native rather than a spinning glyph -
-# VS Code animates a Braille character because a terminal has nothing better, and
-# a text glyph here would be a bet on a font this add-on does not control.
+# `RING` is the ring segment of `UILayout.progress`'s `type` enum, read from the
+# installed 5.2.2's RNA rather than remembered, and it is Blender's own busy
+# primitive: an arc. Native rather than a spinning glyph, because VS Code animates a
+# Braille character only because a terminal has nothing better, and a text glyph
+# here would be a bet on a font this add-on does not control.
+#
+# It is also the panel's **only** indicator, deliberately. A second one - a `BAR`
+# along the prompt editor, standing in for VS Code's travelling shine - was built,
+# looked at, and removed: a fill is the determinate shape and the arc is the
+# indeterminate one, so the two contradicted each other about one turn, and the arc
+# is the one that cannot be misread.
 RING_SECONDS = 1.2   # one full turn of the arc
-BAR_SECONDS = 1.6    # one there-and-back of the bar
 
 
 def ring_sweep(now: float | None = None) -> float:
     """0->1 sawtooth: the arc fills, then starts again - rotation with no end."""
     moment = time.monotonic() if now is None else now
     return (moment % RING_SECONDS) / RING_SECONDS
-
-
-def bar_sweep(now: float | None = None) -> float:
-    """0->1->0 triangle, for the shine along the prompt editor.
-
-    A sawtooth there would read as a progress bar that keeps *nearly* finishing,
-    which is a claim about the request's end that nobody can make. There and back
-    has no such reading: it is the standard indeterminate motion.
-    """
-    moment = time.monotonic() if now is None else now
-    phase = (moment % BAR_SECONDS) / BAR_SECONDS
-    return 1.0 - abs(2.0 * phase - 1.0)
 
 # Ticket 09 §6: one redaction boundary, applied where text becomes visible, so
 # no error path and no crash report can leak a key into the transcript.

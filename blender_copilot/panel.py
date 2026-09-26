@@ -634,13 +634,14 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
 
     # -- chrome --------------------------------------------------------------
     def _draw_working(self, layout, context):
-        """The "it is working" strip: an arc, what it is doing, and for how long.
+        """The working indicator: an arc, what it is doing, and for how long.
 
         Drawn only while a turn is in flight, and directly under the header rather
         than beside the transcript, because it has to be visible when the answer is
         not. A Panel cannot scroll itself, so the end of an unbounded transcript can
         be an arbitrary distance below the fold - and "is it working or has it
-        died?" must not cost a scroll to answer.
+        died?" must not cost a scroll to answer. It is the panel's **only** busy
+        mark; see `_draw_input` for the second one that was built and removed.
 
         The arc is `progress(type="RING")`, Blender's own busy primitive, driven by
         the **wall clock** (`conversation.ring_sweep`): a frame counted per event
@@ -769,18 +770,28 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
                 box.label(text=chunk)
 
     def _draw_input(self, layout, context, settings):
-        """The prompt editor, and the shine that says it is busy.
+        """The prompt editor.
 
-        VS Code Copilot animates a gradient around its prompt box while a request
-        is in flight. A Panel cannot colour or animate a *border* - `layout.alert`
-        is the only outline and it is red, which would read as an error - so the
-        nearest honest thing is drawn at the editor's own edge: a `progress` bar
-        inside the same box, whose fill travels, and only while a turn is in
-        flight. `BAR` rather than `RING` because its job is to sit along that edge.
+        Boxed, so the one place you type into is visibly *a* place - the panel's
+        rows are all boxed and the editor was the exception.
 
-        `conversation.bar_sweep` bounces there and back instead of sweeping: a
-        sawtooth fill reads as a progress bar that keeps *nearly* finishing, which
-        is a claim about a request's end that nothing here can make.
+        **One indicator, and it is not here.** This box briefly carried a second
+        one: a `progress` bar along the editor's edge, as the nearest thing Blender
+        has to the shine VS Code animates around its prompt box. It went, for two
+        reasons that are about honesty rather than taste:
+
+          * a fill is the **determinate** shape - a still screenshot of it reads as
+            "40% done" - while the strip's arc is the indeterminate one, so the two
+            contradicted each other about the same turn;
+          * `progress(factor, type)` cannot draw the shine anyway: `factor` controls
+            how *much* fills from the left edge and never *where* a narrow highlight
+            sits, so a travelling shine is not expressible with it. An ASCII marquee
+            could travel, and would look like ASCII marquee under a text box.
+
+        What the shine was reaching for - "the thing I just typed into is busy" - is
+        served by proximity instead: `_draw_working` sits two rows above this box,
+        and the two are read in one glance, which is why a second mark here was
+        duplication rather than a second affordance.
         """
         box = layout.box()
         box.textbox(
@@ -789,8 +800,6 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             initial_visible_lines=3,
             placeholder="Ask Blender...",
         )
-        if conversation.session.streaming:
-            box.progress(factor=conversation.bar_sweep(), type="BAR")
 
     def _draw_actions(self, layout, context, wrap_chars):
         session = conversation.session
