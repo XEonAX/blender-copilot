@@ -9,7 +9,8 @@ Issues and specs for this repo live as markdown files in `.scratch/`.
 - Implementation issues are one file per ticket at
   `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`, never a
   single combined tickets file
-- Triage state is recorded as a `Status:` line near the top of each issue file
+- Triage state is recorded as a `Triage:` line near the top of each issue file,
+  separate from the wayfinder `Status:` vocabulary (see `triage-labels.md`)
 - Comments and conversation history append to the bottom of the file under a
   `## Comments` heading
 
@@ -75,5 +76,15 @@ tickets can be worked at once — but `map.md` is shared:
 
 ## Current effort
 
-`.scratch/blender-copilot/` — a Copilot-style chat panel that runs inside
-Blender. See its `map.md` for the destination.
+Two directories, deliberately separate because their tickets answer different
+questions and use different vocabularies:
+
+- **`.scratch/blender-copilot/`** — the *decision* map: a Copilot-style chat panel
+  that runs inside Blender. 18/18 resolved. Uses the `Status:` vocabulary above
+  with `Blocked by:` edges, and every decision in it was ratified by the project
+  owner (`docs/ratification.md`). Read `map.md` first.
+- **`.scratch/blender-copilot-build/`** — the *build* tickets that implement that
+  ratified design, numbered from `01` in dependency order. These are not decisions
+  and must not be mistaken for them: they carry `Triage: ready-for-agent`, and a
+  finished one means "code exists", never "a design was settled". Work the
+  frontier — any ticket whose blockers are done.

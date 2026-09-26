@@ -169,3 +169,21 @@ tools/wayfinder-wave.sh   launches parallel pi instances, one per ticket
 .scratch/blender-copilot/ the wayfinder map, tickets and research
 dist/                     built packages (gitignored)
 ```
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as markdown files under `.scratch/` — local markdown, no git remote.
+See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, used verbatim. On a ticket the role goes on its
+own `Triage:` line, separate from the wayfinder `Status:`.
+See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` plus `docs/adr/` at the repo root, created lazily.
+See `docs/agents/domain.md`.
