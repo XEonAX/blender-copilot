@@ -4,9 +4,10 @@ One real turn works end to end: a prompt typed in the panel goes to a worker
 subprocess (`transport.py` launches `_worker.py`, which is HTTP and SSE only),
 the reply streams back over a pipe, and a `bpy.app.timers` drain repaints the
 sidebar as it arrives. The three tools (`run_blender_python`, `get_scene_info`,
-`get_rna_info`) are declared and run on Blender's main thread (`toolbox.py`); no
-persistence and no undo push yet - those are the next passes, and the map says
-which tickets own them.
+`get_rna_info`) are declared and run on Blender's main thread (`toolbox.py`).
+History is kept per `.blend` outside the file (`store.py`, `scope.py`), and a turn
+that changed the scene leaves one labelled undo step and a receipt that says what
+it holds (`undo.py`, `undo_blender.py`).
 
 No `bl_info` here on purpose: as an extension, Blender synthesises `bl_info`
 from `blender_manifest.toml` and deletes any hand-written one with a warning.
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, panel, scope, stream, transport
+from . import conversation, panel, scope, stream, transport, undo_blender
 
 _classes = (
     panel.BlenderCopilotPreferences,
@@ -42,9 +43,14 @@ def register() -> None:
     # `scope.py`): without the decorator a `load_post` one is removed before it
     # can run on the first file load, and the whole scope switch would never fire.
     scope.start()
+    # The undo side's change detector, `persistent` for the same measured reason
+    # (`undo_blender._on_depsgraph_update`): without the decorator it stops
+    # firing after the user's first Open.
+    undo_blender.start()
 
 
 def unregister() -> None:
+    undo_blender.stop()
     scope.stop()
     stream.stop()
     # The child's stdin read loop ends on EOF, so an idle orphan is impossible

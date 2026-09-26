@@ -23,15 +23,27 @@ sys.path.insert(0, str(ROOT))
 
 import bpy  # noqa: E402
 import blender_copilot as bc  # noqa: E402
-from blender_copilot import conversation, panel, scope  # noqa: E402
+from blender_copilot import conversation, execution, panel, scope, toolbox, undo  # noqa: E402
 
 
 class StubLayout:
     def __init__(self, log):
         self._log = log
         self.alert = False
-        self.enabled = True
+        self._enabled = True
         self.alignment = ""
+
+    @property
+    def enabled(self):
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, value):
+        # Recorded, because "Send is disabled while auto-run is paused" is a
+        # claim about a drawn property and nothing else in this file can see it.
+        self._enabled = bool(value)
+        if not value:
+            self._log.append(("disabled", "", ""))
 
     def _child(self):
         return StubLayout(self._log)
@@ -96,6 +108,27 @@ def long_labels(log: list) -> list:
     return sorted(out, reverse=True)
 
 
+def send_is_disabled(log: list) -> bool:
+    """Whether the Send row itself was drawn disabled.
+
+    The flag alone is not specific: the running-tool note disables a row too, and
+    the demo transcript always has a running tool. What identifies the Send row is
+    a disable marker on the very entry before the Send operator - the panel
+    assigns `enabled` and then draws the button in the same sub-row.
+    """
+    for index, entry in enumerate(log):
+        if entry != ("disabled", "", "") or index + 1 >= len(log):
+            continue
+        following = log[index + 1]
+        if (
+            isinstance(following, tuple)
+            and following[0] == "operator"
+            and following[1] == "blender_copilot.send"
+        ):
+            return True
+    return False
+
+
 def longest_label(log: list) -> int:
     """The longest label actually drawn.
 
@@ -118,9 +151,15 @@ def longest_label(log: list) -> int:
     )
 
 
-def fake_context():
+def fake_context(use_global_undo=True, mode="OBJECT"):
+    """A context with the two things the pause rule reads.
+
+    `mode` is settable because the edit-mode pause is a second reason Send is
+    refused, and only a stub can put the panel in it without a GUI.
+    """
     return SimpleNamespace(
-        preferences=SimpleNamespace(edit=SimpleNamespace(use_global_undo=True)),
+        preferences=SimpleNamespace(edit=SimpleNamespace(use_global_undo=use_global_undo)),
+        mode=mode,
         window=None,
     )
 
@@ -143,10 +182,18 @@ def main() -> None:
         # these draw bodies exist to exercise.
         conversation.session.messages.clear()
         conversation.session.messages.extend(conversation._demo())
-        conversation.session.last_receipt = {
-            "summary": "1 object changed - Cube scaled on Z",
-            "coverage": "Ctrl+Z reverts that turn; Ctrl+Alt+Z opens Blender's undo history",
-        }
+        # The receipt is built by the **real rule** against a real change to this
+        # run's scene, not typed in here. A hand-written fixture is how this file
+        # would keep passing after `undo.receipt` changed shape - which is what
+        # happened when ticket 05 replaced the two-key receipt, and it failed
+        # loudly, which is the point of building it this way instead.
+        before = execution.scene_summary(toolbox.WORLD, captured="turn_start")
+        bpy.context.scene.collection.objects.link(bpy.data.objects.new("Target", None))
+        after = execution.scene_summary(toolbox.WORLD, captured="turn_end")
+        conversation.session.last_receipt = undo.receipt(
+            before, after, pushed=True, label_text="copilot: add a target empty"
+        )
+        assert conversation.session.last_receipt["changed"], conversation.session.last_receipt
 
         for variant in ("log", "boxes", "external"):
             for expanded in (False, True):
@@ -288,6 +335,110 @@ def main() -> None:
         assert "invoke" in vars(panel.BLENDER_COPILOT_OT_delete_history), "no confirmation"
         assert "cannot be undone" in panel.BLENDER_COPILOT_OT_delete_history.bl_description
         print("ok   delete-all goes through a confirmation, not straight to execute")
+
+        # --- the undo receipt and the pause (build ticket 05) -----------------
+        # The receipt was built by the real rule against a real change to this
+        # run's scene (see the seeding above), and it is drawn by the real draw
+        # body. It is re-made here because `begin_turn` cleared it: the stop-slot
+        # check above opened a turn, and a new turn supersedes the last receipt -
+        # which is the behaviour, not a leak.
+        conversation.session.last_receipt = undo.receipt(
+            before, after, pushed=True, label_text="copilot: add a target empty"
+        )
+        log = []
+        instance._draw_receipt(StubLayout(log), panel.wrap_budget(context))
+        joined = " ".join(entry[1] for entry in log if entry[0] == "label")
+        assert "Undoable" in joined, joined
+        assert "objects:" in joined, joined
+        assert "EMPTY: none" in joined, joined
+        assert undo.REVERT_LINE in joined, joined
+        assert undo.HISTORY_LINE in joined, joined
+        assert undo.COVERAGE_LINE in joined, joined
+        print("ok   the receipt names what changed, the shortcut and the coverage line")
+        # Wrapped, not one long label. The panel MIDDLE-CLIPS what does not fit,
+        # and a clipped receipt is one whose whole job - naming what changed -
+        # fails silently.
+        assert longest_label(log) <= LABEL_SOFT_LIMIT, longest_label(log)
+
+        # A refused step must not look like a step.
+        conversation.session.last_receipt = undo.receipt(
+            before,
+            after,
+            pushed=False,
+            reason=undo.REFUSED_EDIT_MODE,
+            label_text="copilot: add a target empty",
+        )
+        log = []
+        instance._draw_receipt(StubLayout(log), panel.wrap_budget(context))
+        joined = " ".join(entry[1] for entry in log if entry[0] == "label")
+        assert "Not undoable" in joined, joined
+        assert "edit mode" in joined, joined
+        assert undo.REVERT_LINE not in joined, joined
+        assert undo.HISTORY_LINE not in joined, joined
+        assert undo.COVERAGE_LINE in joined, joined
+        print("ok   a refused step says so, and never claims Ctrl+Z takes it back")
+
+        # No step was created: no receipt box at all, rather than an empty one.
+        conversation.session.last_receipt = None
+        log = []
+        instance._draw_receipt(StubLayout(log), panel.wrap_budget(context))
+        assert log == [], log
+        print("ok   a turn that changed nothing draws no receipt")
+        conversation.session.last_receipt = undo.receipt(
+            before, after, pushed=True, label_text="copilot: add a target empty"
+        )
+
+        # Global Undo off: the banner names the pause and offers the fix, and Send
+        # is drawn disabled. Both halves, because the failure §4 exists to stop is
+        # a Send that still looks pressable when nothing can be recovered.
+        off = fake_context(use_global_undo=False)
+        log = []
+        instance._draw_header(StubLayout(log), off)
+        joined = " ".join(entry[1] for entry in log if entry[0] == "label")
+        for line in undo.PAUSE_LINES[undo.PAUSE_GLOBAL_UNDO]:
+            assert line in joined, (line, joined)
+        assert (
+            "operator",
+            "blender_copilot.enable_global_undo",
+            "Turn Global Undo on",
+        ) in log, log
+        print("ok   Global Undo off draws the pause banner and the one-click fix")
+
+        log = []
+        instance._draw_actions(StubLayout(log), off, panel.wrap_budget(context))
+        assert send_is_disabled(log), log
+        assert ("operator", "blender_copilot.send", "Send") in log, log
+        print("ok   and Send is drawn disabled while auto-run is paused")
+
+        # Edit mode pauses too - *Confirm the four undo cases in a GUI* measured
+        # that a push there records nothing usable and the undo after it deletes
+        # the object - and its banner is a different one with no button, because
+        # the fix is the user's own Tab key.
+        edit = fake_context(mode="EDIT_MESH")
+        log = []
+        instance._draw_header(StubLayout(log), edit)
+        joined = " ".join(entry[1] for entry in log if entry[0] == "label")
+        assert undo.PAUSE_LINES[undo.PAUSE_EDIT_MODE][0] in joined, joined
+        assert "Auto-run is paused" in joined, joined
+        assert (
+            "operator",
+            "blender_copilot.enable_global_undo",
+            "Turn Global Undo on",
+        ) not in log, log
+        log = []
+        instance._draw_actions(StubLayout(log), edit, panel.wrap_budget(context))
+        assert send_is_disabled(log), log
+        print("ok   edit mode pauses it too, with its own banner and no button")
+
+        # And with neither pause, no banner and a live Send.
+        log = []
+        instance._draw_header(StubLayout(log), context)
+        joined = " ".join(entry[1] for entry in log if entry[0] == "label")
+        assert "Auto-run is paused" not in joined, joined
+        log = []
+        instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
+        assert not send_is_disabled(log), log
+        print("ok   with neither pause there is no banner and Send is live")
 
         print("\nall draw bodies ran")
     finally:

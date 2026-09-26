@@ -30,6 +30,13 @@ the three things that need `bpy` and `conversation.py` may not have it: the
 sender, the tool executor, and the live scene summary. `attach` is the same seam
 the CPython checks use with fakes.
 
+The tick is also where the undo side's baseline marker goes in, immediately
+before a `run_blender_python` call (`undo_blender.baseline`) - the one part of the
+undo rule that has to run inside the loop's tick rather than at a turn's edge,
+because it has to happen *before* the code it protects. The edge itself (one step
+and one receipt per turn) is wired through `conversation.attach` and lives in
+`conversation._end_turn`.
+
 Deliberately a module-level function, not a bound method: timers holding bound
 methods have historically needed a keep-alive workaround, and a plain function
 sidesteps it.
@@ -39,7 +46,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, prompt, scope, toolbox, transport
+from . import conversation, prompt, scope, toolbox, transport, undo_blender
 
 # 50 ms. Ticket 11 measured launch-to-ready at 0.021 s and a JSON round trip at
 # 0.02 ms, so this is two orders of magnitude above the IPC it is watching -
@@ -96,22 +103,32 @@ def _tick():
     """
     changed = False
     was_streaming = conversation.session.streaming
-    events = transport.worker.tick()
-    if events:
-        for event in events:
-            if conversation.session.apply_event(event):
+    try:
+        events = transport.worker.tick()
+        if events:
+            for event in events:
+                if conversation.session.apply_event(event):
+                    changed = True
+        else:
+            # A code call is about to run: put the baseline marker behind it
+            # first, if this session has never pushed one (ticket 12 §1). It has
+            # to happen *before* the call, because its whole purpose is to record
+            # the scene as it was before the agent touched it.
+            pending = conversation.session.next_call
+            if pending is not None:
+                undo_blender.baseline(pending)
+            # Only when nothing was drained: a tool call blocks the main thread
+            # for its whole duration, so it gets a tick to itself.
+            if conversation.session.pump():
                 changed = True
-    elif conversation.session.pump():
-        # Only when nothing was drained: a tool call blocks the main thread for
-        # its whole duration, so it gets a tick to itself.
-        changed = True
-
-    # A turn that just ended is the store's write point. The conversation only
-    # changes during a turn, so this is the one moment a file write can hold
-    # anything new - and `persist()` itself writes nothing when it would change
-    # nothing, so the check costs a list comparison on a tick that did nothing.
-    if was_streaming and not conversation.session.streaming and scope.persist():
-        changed = True
+    finally:
+        # Ticket 04's write point: a turn that just ended is the one moment the
+        # conversation can hold anything new. The undo step for that same turn is
+        # written by `conversation._end_turn` instead, so that Stop, a cap and a
+        # failed transport all get one too - they end a turn without this tick
+        # ever seeing the transition.
+        if was_streaming and not conversation.session.streaming and scope.persist():
+            changed = True
 
     if changed:
         tag_view3d_redraw()
@@ -138,7 +155,12 @@ def stop() -> None:
 
 # Wire the loop once, at import. `conversation.session` is the process's single
 # conversation (ticket 18: a second panel is an identical view of it), so the
-# collaborators belong to the module that can see `bpy`, not to the turn.
+# collaborators belong to the module that can see `bpy`, not to the turn. `undo`
+# rides the same seam: the loop tells it when a turn opens and closes, and never
+# learns what a `undo_push` is.
 conversation.session.attach(
-    send=_send_round, execute=toolbox.execute, context=prompt.context
+    send=_send_round,
+    execute=toolbox.execute,
+    context=prompt.context,
+    undo=undo_blender,
 )

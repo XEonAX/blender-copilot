@@ -38,7 +38,7 @@ import os
 
 import bpy
 
-from . import conversation, store, transport
+from . import conversation, store, transport, undo_blender
 
 ENV_DIR = "BLENDER_COPILOT_HISTORY_DIR"
 
@@ -125,6 +125,11 @@ def switch(blend_path: str) -> bool:
         return False
 
     transport.worker.reset()
+    # Before the turn is abandoned, and therefore before `_end_turn` writes the
+    # turn's undo step: that turn belongs to the file being left, and a push
+    # judged in the next tick would record the *new* file's state under its
+    # label. Undo cannot follow a load anyway - loading discards the stack.
+    undo_blender.forget()
     conversation.session.abandon()
     persist()
 

@@ -34,6 +34,13 @@ assert _exec_spec and _exec_spec.loader
 execution = importlib.util.module_from_spec(_exec_spec)
 _exec_spec.loader.exec_module(execution)
 
+_undo_spec = importlib.util.spec_from_file_location(
+    "undo", _HERE.parent / "blender_copilot" / "undo.py"
+)
+assert _undo_spec and _undo_spec.loader
+undo = importlib.util.module_from_spec(_undo_spec)
+_undo_spec.loader.exec_module(undo)
+
 
 def check(label: str, condition: bool) -> None:
     assert condition, f"FAILED: {label}"
@@ -415,8 +422,10 @@ def fail_executor(call):
     }
 
 
-def wire(session, sender, execute=ok_executor):
-    session.attach(send=sender, execute=execute, context=lambda: ("BASE", "LIVE SUMMARY"))
+def wire(session, sender, execute=ok_executor, undo=None):
+    session.attach(
+        send=sender, execute=execute, context=lambda: ("BASE", "LIVE SUMMARY"), undo=undo
+    )
     return session
 
 
@@ -939,6 +948,351 @@ check(
     "but it still fences the generation, so a stray fatal event cannot invent a banner",
     idle.apply_event({"ev": "startup_failed", "fatal": True, "message": "boom"}) is False
     and idle.transport_error is None,
+)
+
+
+# ==========================================================================
+# The undo step and the receipt (build ticket 05). The rule is bpy-free - the
+# label, the mutation diff, the exact sentences and the pause decision are all
+# decided in `undo.py` - so all of it is checked here. Only the push itself needs
+# Blender, and that is `tools/undo_step_probe.py`'s job.
+# ==========================================================================
+print("\n-- the turn's undo record --")
+
+
+class FakeUndo:
+    """The undo seam, recorded. `undo_blender` is what it stands in for.
+
+    The loop must never learn what a `undo_push` is, so what is checkable here is
+    exactly the protocol: one open per turn with the user's own words, and one
+    close per turn however the turn ends.
+    """
+
+    def __init__(self):
+        self.opened: list[str] = []
+        self.closed = 0
+
+    def open_turn(self, text: str) -> bool:
+        self.opened.append(text)
+        return True
+
+    def close_turn(self) -> bool:
+        self.closed += 1
+        return True
+
+
+class AngryEnd(conversation.Conversation):
+    """A conversation whose `_end_turn` cannot finish its own bookkeeping.
+
+    `close_turn` sits in a `finally` because a path that dies halfway through
+    ending a turn must still leave the user a Ctrl+Z (ticket 12 §1). This is the
+    only way on plain CPython to make that path happen: `_end_turn`'s own body
+    raises, and the step still has to be written.
+    """
+
+    def __init__(self):
+        self._bomb = False
+        super().__init__()
+
+    @property
+    def pending(self):
+        return self._pending
+
+    @pending.setter
+    def pending(self, value):
+        if self._bomb:
+            raise RuntimeError("the turn ends badly")
+        self._pending = value
+
+
+records = FakeUndo()
+undone = wire(conversation.Conversation(), FakeSender(), undo=records)
+undone.begin_turn("  make it taller  ")
+check("a turn opens the undo record", records.opened == ["make it taller"])
+check("and nothing has closed yet", records.closed == 0)
+deliver(undone, text="done")
+check("a finished turn closes it, once", records.closed == 1)
+deliver(undone, text="again")
+check("a second reply does not close it again", records.closed == 1)
+undone.begin_turn("stop this one")
+undone.cancel()
+check("Stop closes it too", records.closed == 2)
+undone.begin_turn("and this one")
+undone.fail_turn("worker_unavailable", "the worker died")
+check("a transport failure closes it", records.closed == 3)
+undone.begin_turn("truncated")
+deliver(undone, reason="length")
+check("a truncated reply closes it", records.closed == 4)
+check(
+    "and every open belongs to its own turn",
+    records.opened == ["make it taller", "stop this one", "and this one", "truncated"],
+)
+
+angry = AngryEnd()
+angry_undo = FakeUndo()
+wire(angry, FakeSender(), undo=angry_undo)
+angry.begin_turn("end badly")
+angry._bomb = True
+try:
+    angry._end_turn()
+    exploded = False
+except RuntimeError:
+    exploded = True
+check(
+    "a turn that dies halfway through ending still leaves its undo step",
+    exploded and angry_undo.closed == 1,
+)
+
+
+print("\n-- the undo rule --")
+
+
+def summary(**over):
+    """A `get_scene_info` summary object, as `execution.scene_summary` builds it."""
+    fields = {
+        "scene": "Scene",
+        "filepath": "/tmp/scene.blend",
+        "is_saved": True,
+        "is_dirty": False,
+        "mode": "OBJECT",
+        "frame": 1,
+        "frame_range": [1, 250],
+        "render_engine": "BLENDER_EEVEE_NEXT",
+        "unit_system": "METRIC",
+        "global_undo": True,
+        "object_count": 3,
+        "collection_tree": [{"name": "Collection", "count": 3, "children": []}],
+        "collection_tree_truncated": False,
+        "object_type_counts": {"MESH": 1, "CAMERA": 1, "LIGHT": 1},
+        "selection": {"count": 1, "names": ["Cube"]},
+        "active": {"name": "Cube", "type": "MESH"},
+        "captured": "turn_start",
+        "schema": 1,
+    }
+    fields.update(over)
+    return fields
+
+
+# -- the label: the step has to name the turn it belongs to ----------------
+check(
+    "the step is labelled with the turn",
+    undo.label("make the cube taller") == "copilot: make the cube taller",
+)
+check(
+    "a label is one line, whatever shape the turn had",
+    undo.label("  make\n it   taller  ") == "copilot: make it taller",
+)
+LONG_TURN = "please make the cube taller on the z axis and then tell me about it"
+long_label = undo.label(LONG_TURN)
+check(
+    "a long turn is cut to the label budget, ellipsis included",
+    len(long_label) <= len(undo.LABEL_PREFIX) + undo.LABEL_CHARS + 1,
+)
+check(
+    "and it is cut at a word, not mid-word",
+    long_label == "copilot: please make the cube taller on the z\u2026",
+)
+check("a blank turn still labels its step", undo.label("") == "copilot: agent turn")
+check(
+    "the baseline marker is a marker, not a turn",
+    undo.BASELINE_LABEL.startswith(undo.LABEL_PREFIX) and undo.BASELINE_LABEL != undo.label(""),
+)
+
+# -- what a turn changed, from the bounded summary -------------------------
+check("a turn that changed nothing has nothing to name", undo.changes(summary(), summary()) == [])
+check(
+    "and the capture's own stamp is not a change",
+    undo.changes(summary(), summary(captured="turn_end")) == [],
+)
+check(
+    "an added object is named, with the object count",
+    undo.changes(
+        summary(),
+        summary(object_count=4, object_type_counts={"MESH": 2, "CAMERA": 1, "LIGHT": 1}),
+    )
+    == ["objects: 3 \u2192 4", "MESH: 1 \u2192 2"],
+)
+check(
+    "a removed object is named too",
+    undo.changes(
+        summary(),
+        summary(object_count=2, object_type_counts={"MESH": 1, "CAMERA": 1}),
+    )
+    == ["objects: 3 \u2192 2", "LIGHT: 1 \u2192 none"],
+)
+check(
+    "a new active object is named",
+    undo.changes(summary(), summary(active={"name": "Camera", "type": "CAMERA"}))
+    == ["active: Cube \u2192 Camera"],
+)
+check("a selection is named", undo.changes(summary(), summary(selection={"count": 3, "names": []})) == ["selection: 1 \u2192 3"])
+check("a mode change is named", undo.changes(summary(), summary(mode="EDIT_MESH")) == ["mode: OBJECT \u2192 EDIT_MESH"])
+check(
+    "a different file is named, because that is a save",
+    undo.changes(summary(), summary(filepath="/tmp/other.blend")) == ["file: /tmp/scene.blend \u2192 /tmp/other.blend"],
+)
+check(
+    "a collection change is named without pretending to be precise",
+    undo.changes(
+        summary(),
+        summary(collection_tree=[{"name": "Targets", "count": 1, "children": []}]),
+    )
+    == ["collections changed"],
+)
+check(
+    "a frame change is named",
+    undo.changes(summary(), summary(frame=20)) == ["frame: 1 \u2192 20"],
+)
+BUSY_AFTER = dict(
+    object_count=9,
+    object_type_counts={"MESH": 8},
+    mode="EDIT_MESH",
+    frame=20,
+    scene="Scene.001",
+    global_undo=False,
+)
+busy_diff = undo.changes(summary(), summary(**BUSY_AFTER))
+check("a turn that did five things produces five lines", len(busy_diff) > undo.RECEIPT_MAX_LINES)
+
+# -- the receipt the panel shows -------------------------------------------
+pushed = undo.receipt(
+    summary(),
+    summary(object_count=4),
+    pushed=True,
+    label_text="copilot: add a cube",
+)
+check("a pushed turn is undoable", pushed["undoable"] is True and pushed["title"] == "Undoable")
+check("the receipt names what changed", pushed["changed"] == ["objects: 3 \u2192 4"])
+check("the receipt carries the step's label", pushed["label"] == "copilot: add a cube")
+check(
+    "and it says one Ctrl+Z takes the turn back",
+    any("Ctrl+Z reverts this turn" in line for line in pushed["lines"]),
+)
+check(
+    "it names the shortcut for Blender's undo history",
+    any("Ctrl+Alt+Z" in line for line in pushed["lines"]),
+)
+check(
+    "and it is honest about what undo does not cover",
+    any("files, network" in line for line in pushed["lines"]),
+)
+check("with nothing dropped, it says so", pushed["more"] == 0)
+
+many = undo.receipt(
+    summary(), summary(**BUSY_AFTER), pushed=True, label_text="copilot: do five things"
+)
+check(
+    "a busy turn is named, but the receipt stays short",
+    len(many["changed"]) == undo.RECEIPT_MAX_LINES,
+)
+check(
+    "and it reports how many lines it did not draw",
+    many["more"] == len(busy_diff) - undo.RECEIPT_MAX_LINES,
+)
+
+unnamed = undo.receipt(
+    # Identical summaries: the depsgraph flag is what pushed this turn, and a
+    # scale on an existing object is exactly the change the bounded summary
+    # cannot see (it is datablock-level, not property-level).
+    summary(),
+    summary(),
+    pushed=True,
+    label_text="copilot: make it taller",
+)
+check(
+    "a change the bounded summary cannot see is still admitted, not invented",
+    unnamed["changed"] == [undo.UNNAMED_CHANGE],
+)
+check(
+    "and the receiver of that is told it is not a property list",
+    "data changed" in unnamed["changed"][0],
+)
+
+refused = undo.receipt(
+    summary(mode="EDIT_MESH"),
+    summary(mode="EDIT_MESH"),
+    pushed=False,
+    reason=undo.REFUSED_EDIT_MODE,
+    label_text="copilot: build a box",
+)
+check("a refused step is not undoable", refused["undoable"] is False and refused["title"] == "Not undoable")
+check(
+    "the receipt says why, in the terms the measurement used",
+    any("edit mode" in line for line in refused["lines"]),
+)
+check(
+    "and it does not claim Ctrl+Z reverts this turn",
+    not any("Ctrl+Z reverts this turn" in line for line in refused["lines"]),
+)
+check(
+    "but the coverage sentence is still there, so the promise never grows",
+    any("files, network" in line for line in refused["lines"]),
+)
+check(
+    "a refused step has no changes to name beyond what the diff saw",
+    refused["changed"] == [],
+)
+
+saved = undo.receipt(
+    summary(),
+    summary(filepath="/tmp/other.blend", is_saved=True),
+    pushed=True,
+    label_text="copilot: save it somewhere else",
+)
+check(
+    "an outside-the-blend effect that IS detectable is named, not generally warned about",
+    any("undo does not cover" in line for line in saved["lines"]),
+)
+check(
+    "and that line says what the effect was",
+    any("saved or renamed" in line for line in saved["lines"]),
+)
+check(
+    "an ordinary turn gets no such line",
+    not any("undo does not cover" in line for line in pushed["lines"]),
+)
+
+failed = undo.receipt(
+    summary(),
+    summary(object_count=4),
+    pushed=False,
+    reason=undo.REFUSED_PUSH_FAILED,
+    detail="RuntimeError: Operator bpy.ops.ed.undo_push.poll() failed",
+    label_text="copilot: add a cube",
+)
+check(
+    "a push Blender refused says so with Blender's own words",
+    any("poll() failed" in line for line in failed["lines"]),
+)
+check("and it is still not undoable", failed["undoable"] is False)
+
+# -- when auto-run must pause ---------------------------------------------
+check("Global Undo off pauses auto-run", undo.pause_reason(False, "OBJECT") == undo.PAUSE_GLOBAL_UNDO)
+check("edit mode pauses it too", undo.pause_reason(True, "EDIT_MESH") == undo.PAUSE_EDIT_MODE)
+check("so does any other edit mode", undo.pause_reason(True, "EDIT_CURVE") == undo.PAUSE_EDIT_MODE)
+check(
+    "sculpt mode does not: memfile undo is compatible there (ed_undo.cc:588)",
+    undo.pause_reason(True, "SCULPT") is None,
+)
+check("object mode with Global Undo on runs", undo.pause_reason(True, "OBJECT") is None)
+check(
+    "the two pauses are distinguishable on screen",
+    undo.PAUSE_LINES[undo.PAUSE_GLOBAL_UNDO] != undo.PAUSE_LINES[undo.PAUSE_EDIT_MODE],
+)
+check(
+    "and each says auto-run is paused",
+    all(
+        any("paused" in line for line in undo.PAUSE_LINES[code])
+        for code in (undo.PAUSE_GLOBAL_UNDO, undo.PAUSE_EDIT_MODE)
+    ),
+)
+check(
+    "the Global Undo banner still offers the fix",
+    undo.PAUSE_ACTION[undo.PAUSE_GLOBAL_UNDO] == "blender_copilot.enable_global_undo",
+)
+check(
+    "the edit-mode banner offers nothing but leaving edit mode",
+    undo.PAUSE_ACTION[undo.PAUSE_EDIT_MODE] == "",
 )
 
 

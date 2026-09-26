@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, prompt, scope, stream, toolbox, transport
+from . import conversation, prompt, scope, stream, toolbox, transport, undo, undo_blender
 
 CATEGORY = "Copilot"
 NON_HOST_AREAS = {"TEXT_EDITOR", "PREFERENCES", "STATUSBAR", "TOPBAR"}
@@ -164,8 +164,15 @@ class BLENDER_COPILOT_OT_send(bpy.types.Operator):
         if session.streaming:
             self.report({"INFO"}, "A turn is already running")
             return {"CANCELLED"}
-        if not context.preferences.edit.use_global_undo:
-            self.report({"ERROR"}, "Global Undo is off - auto-run is paused")
+        # §4's pause. Asked through `undo_blender` so the banner, this refusal and
+        # the disabled button all answer from the same rule - and asked with
+        # *this* context, because that is the one the panel is drawing for.
+        pause = undo_blender.pause_reason(context)
+        if pause:
+            self.report(
+                {"ERROR"},
+                f"{undo.PAUSE_LINES[pause][0]} Auto-run is paused",
+            )
             return {"CANCELLED"}
 
         text = settings.prompt_text.strip()
@@ -466,17 +473,24 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         scope_row = layout.row(align=True)
         scope_row.label(text=scope.header(), icon="FILE_BLEND")
 
-        if not context.preferences.edit.use_global_undo:
+        pause = undo_blender.pause_reason(context)
+        if pause:
+            # Wrapped, and each sentence its own label: a bare column clips at a
+            # much smaller width than a box does, which is how an earlier note in
+            # this file shipped reading "running code - c...ed until it returns".
+            # The budget is read here rather than passed in, so this method stays
+            # callable with just the context the way `draw` calls it.
+            budget = wrap_budget(context)
             banner = layout.box()
             banner.alert = True
-            banner.label(text="Global Undo is off.", icon="ERROR")
-            banner.label(text="Nothing the agent runs can be undone.")
-            banner.label(text="Auto-run is paused.")
-            banner.operator(
-                "blender_copilot.enable_global_undo",
-                text="Turn Global Undo on",
-                icon="CHECKMARK",
-            )
+            for position, line in enumerate(undo.PAUSE_LINES[pause]):
+                for chunk in conversation.wrap(line, budget):
+                    banner.label(text=chunk, icon="ERROR" if position == 0 else "NONE")
+            action = undo.PAUSE_ACTION[pause]
+            if action:
+                banner.operator(
+                    action, text="Turn Global Undo on", icon="CHECKMARK"
+                )
 
     def _draw_transport(self, layout, budget):
         """Ticket 11's persistent failure state: a reason, a disabled Send, and
@@ -499,20 +513,35 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         )
 
     def _draw_receipt(self, layout, budget):
+        """The step the last turn created, and what it holds (build ticket 05).
+
+        Drawn straight after the transcript, because the transcript ends with the
+        turn this receipt describes. A turn that changed nothing clears it
+        (`undo_blender.finish_turn`), so what is on screen is always about a real
+        step that exists right now.
+
+        Everything is wrapped: a receipt whose *point* is naming what changed, and
+        which Blender middle-clips, names nothing.
+        """
         receipt = conversation.session.last_receipt
         if not receipt:
             return
         box = layout.box()
-        row = box.row(align=True)
-        row.label(text="Undoable", icon="CHECKMARK")
-        # Wrapped, not drawn as one label: the coverage sentence is ~65 characters
-        # and at the measured 7.0 px/char that needs 455 px, so on a default-width
-        # sidebar an unwrapped label is middle-clipped - and this is the line that
-        # tells the user how to undo.
-        for line in conversation.wrap(receipt["summary"], budget):
-            box.label(text=line)
-        for line in conversation.wrap(receipt["coverage"], budget):
-            box.label(text=line)
+        if not receipt["undoable"]:
+            box.alert = True
+        head = box.row(align=True)
+        head.label(
+            text=receipt["title"],
+            icon="CHECKMARK" if receipt["undoable"] else "ERROR",
+        )
+        for line in receipt["changed"]:
+            for chunk in conversation.wrap(line, budget):
+                box.label(text=chunk)
+        if receipt["more"]:
+            box.label(text=f"and {receipt['more']} more")
+        for line in receipt["lines"]:
+            for chunk in conversation.wrap(line, budget):
+                box.label(text=chunk)
 
     def _draw_input(self, layout, context, settings):
         layout.textbox(
@@ -525,15 +554,17 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
     def _draw_actions(self, layout, context, budget):
         session = conversation.session
         row = layout.row(align=True)
-        undo_on = context.preferences.edit.use_global_undo
+        paused = bool(undo_blender.pause_reason(context))
         if session.streaming:
             # Stop replaces Send in the same slot, so its position never moves.
             row.operator("blender_copilot.stop", text="Stop", icon="PAUSE")
         else:
             sub = row.row(align=True)
             # Disabled when auto-run is paused, and when there is no transport to
-            # send through. A Send that cannot work must not look pressable.
-            sub.enabled = undo_on and not session.transport_error
+            # send through. A Send that cannot work must not look pressable - and
+            # the pause is `undo_blender`'s answer here, not a second reading of
+            # the preference, so the button and the banner cannot disagree.
+            sub.enabled = not paused and not session.transport_error
             sub.operator("blender_copilot.send", text="Send", icon="PLAY")
         row.operator("blender_copilot.clear", text="Clear", icon="TRASH")
 

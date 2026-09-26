@@ -66,10 +66,12 @@ CODE_TEXT = "Copilot Code"
 TRANSCRIPT_TEXT = "Copilot Transcript"
 
 # The honest coverage sentence, shown once and persistently under the input
-# (settled by *What replaces undo as the recovery mechanism?*).
+# (settled by *What replaces undo as the recovery mechanism?* §5). Split at the
+# sentence boundary rather than mid-sentence: the panel wraps each line to the
+# sidebar's own width, and a hard split here would fight it.
 COVERAGE_LINES = (
     "Ctrl+Z undoes one agent turn.",
-    "Files, network and preferences cannot be undone.",
+    "Changes outside this .blend cannot be undone: files, network, preferences.",
 )
 
 # What the panel is doing *now*, for the Stop control. `None` means idle.
@@ -189,6 +191,15 @@ def _plain_arguments(call: dict) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def call_name(call: dict) -> str:
+    """The tool a wire `tool_call` asks for, or "" when it names none.
+
+    Used by the repeat detector, and by the undo side (`undo_blender.baseline`),
+    which has to know whether the call about to run can mutate the scene at all.
+    """
+    return str((call.get("function") or {}).get("name") or "")
+
+
 def _signature(call: dict) -> str:
     """Tool plus canonical arguments: one call's identity, for the repeat detector.
 
@@ -202,7 +213,7 @@ def _signature(call: dict) -> str:
         canonical = str(function.get("arguments"))
     else:
         canonical = json.dumps(arguments, sort_keys=True, default=str)
-    return f"{function.get('name') or ''} {canonical}"
+    return f"{call_name(call)} {canonical}"
 
 
 def _synthetic_result(tool: str, kind: str, message: str) -> dict:
@@ -360,6 +371,9 @@ class Conversation:
         self.send = None
         self.execute = None
         self.context = None
+        # The undo side, if a session has one wired: `open_turn(text)` when a turn
+        # starts and `close_turn()` when it ends. See `attach`.
+        self.undo = None
         self._rows: dict = {}
         self._rounds = 0
         self._calls = 0
@@ -466,6 +480,18 @@ class Conversation:
                 return message
         return None
 
+    @property
+    def next_call(self) -> dict | None:
+        """The call the next tick will run, without running it.
+
+        Read by `stream._tick` for the undo side's baseline guard, which has to
+        put its marker *before* the code runs and therefore has to see what is
+        queued. Returns `None` when the turn is not in its tool phase or the queue
+        is empty, which is the honest answer to "what will run next" - nothing.
+        """
+        if self.phase != PHASE_TOOL or not self.pending:
+            return None
+        return self.pending[0]
     # -- the turn ------------------------------------------------------------
     def _reply_text(self) -> str:
         if not self.messages:
@@ -498,6 +524,11 @@ class Conversation:
         self.messages.append(Message("assistant", ""))
         self.history.append({"role": "user", "content": prompt})
         self.streaming = True
+        # A new turn supersedes the last receipt. The receipt says "Ctrl+Z reverts
+        # this turn" and is drawn under the transcript, so leaving the previous
+        # turn's receipt up while this one streams would make it read as if it
+        # described *this* turn - a claim about a step that does not exist yet.
+        self.last_receipt = None
         self.turn_generation = self.generation
         self.phase = PHASE_REQUEST
         self.busy_kind = BUSY_STREAM
@@ -512,6 +543,10 @@ class Conversation:
         self._round_calls = 0
         self._round_failures = 0
         self._fail_streak = 0
+        # Last, so the undo side's before-image is taken with the turn already
+        # open: nothing between here and the first tool call touches the scene.
+        if self.undo is not None:
+            self.undo.open_turn(prompt)
 
     def append_text(self, text: str) -> bool:
         # Only while a reply is actually streaming: a late delta arriving during
@@ -720,8 +755,8 @@ class Conversation:
             message.expanded = not message.expanded
 
     # -- the loop (ticket 09 §0) ---------------------------------------------
-    def attach(self, send, execute, context) -> None:
-        """Wire the loop's three collaborators.
+    def attach(self, send, execute, context, undo=None) -> None:
+        """Wire the loop's three collaborators, and the undo side if there is one.
 
         Nothing here may import `bpy` - the CPython checks are the only way to
         exercise a turn at all, because `bpy.app.timers` never pump under
@@ -736,10 +771,22 @@ class Conversation:
             never looks inside it.
           * `context() -> (base_prompt, summary)` - the stable prompt and the live
             scene summary, both read fresh for every request (ticket 09 §4).
+          * `undo.open_turn(text)` / `undo.close_turn()` - the turn's undo record:
+            one step and one receipt per turn, and *this* is where ticket 12 §1's
+            push discipline is anchored. The pair is called from `begin_turn` and
+            from `_end_turn`, which is the single funnel every path out of a turn
+            passes through - so Stop, a cap, a failed transport and a raise in the
+            model's own code all produce the step, and a tick-based observer could
+            not say that (Stop ends the turn inside the operator that handled the
+            click, and the next tick simply never sees the transition).
+          * `undo.close_turn` runs inside a `finally` in `_end_turn`, which is
+            ticket 12 §1's wording and not decoration: a path that dies halfway
+            through ending a turn still leaves the user a Ctrl+Z.
         """
         self.send = send
         self.execute = execute
         self.context = context
+        self.undo = undo
 
     def pump(self) -> bool:
         """Exactly one bounded step of the turn's state machine, or nothing.
@@ -927,12 +974,21 @@ class Conversation:
 
     def _end_turn(self) -> None:
         """Terminal state. Every path out of a turn comes through here, so no
-        path can leave `phase`, `streaming` and the queue disagreeing."""
-        self.streaming = False
-        self.phase = PHASE_IDLE
-        self.busy_kind = None
-        self.pending = []
-        self._round_open = False
+        path can leave `phase`, `streaming` and the queue disagreeing - and so the
+        turn's undo step is written on every one of them (ticket 12 §1).
+        """
+        try:
+            self.streaming = False
+            self.phase = PHASE_IDLE
+            self.busy_kind = None
+            self.pending = []
+            self._round_open = False
+        finally:
+            # The `finally` is the decision's wording and its point: `close_turn`
+            # is what puts one `undo_push` behind the turn, at its end, so an
+            # interrupted turn still leaves a revertible step.
+            if self.undo is not None:
+                self.undo.close_turn()
 
     def clear(self) -> None:
         """Discard the conversation. Deliberately does **not** clear
