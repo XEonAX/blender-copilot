@@ -11,8 +11,26 @@ event becomes visible state, which is why it lives in the bpy-free half.
 
 The message kinds are the ones the layout prototype established - user turn,
 assistant prose, model code, tool call, error - because the layouts in
-`panel.py` still render all of them. Only the first two are produced so far;
-the tools pass fills in the rest.
+`panel.py` render all of them, and all of them are produced now.
+
+Two transcripts live here, and conflating them is the bug this file is shaped to
+prevent:
+
+  * `self.messages` is the **display** transcript: prose, code identity rows, tool
+    rows, error blocks. It is what the panel draws.
+  * `self.history` is the **wire** transcript: verbatim provider messages,
+    including the assistant message that carries `tool_calls` and the `tool`
+    results that answer it. A history missing either half of that pair is rejected
+    outright by the provider (HTTP 400, measured in ticket 16), so it is kept as
+    the provider's own format rather than reconstructed from the display.
+
+The turn itself is a per-tick state machine (ticket 09 §0): `REQUESTING` while a
+reply streams, `TOOL_QUEUE` while queued calls run one per timer tick, then
+either back to `REQUESTING` for the next round or out of the turn. `pump()` is
+that machine's clock and `stream.py` is its only caller. The three things it needs
+from outside - how to send a request, how to run a call, where the live scene
+summary comes from - are injected through `attach()`, because two of them need
+`bpy` and everything worth testing here does not.
 """
 
 from __future__ import annotations
@@ -56,6 +74,24 @@ COVERAGE_LINES = (
 
 # What the panel is doing *now*, for the Stop control. `None` means idle.
 BUSY_STREAM = "stream"
+BUSY_TOOL = "tool"
+
+# The loop's phase (ticket 09 §0). `streaming` answers "is a turn in flight";
+# this answers "where in the turn are we", which is what decides whether the next
+# tick runs a tool call or waits for a reply.
+PHASE_IDLE = "idle"
+PHASE_REQUEST = "request"
+PHASE_TOOL = "tool"
+
+# The caps, transcribed from ticket 09 §1. Why 8 rounds: a normal ask is 2-4
+# rounds (look, act, verify), so 8 allows one self-repair without eating the
+# context window. 24 calls bounds a single round that returns many parallel calls.
+# The repeat detector fires on the *third* identical call - tool plus canonical
+# arguments - and the failure stop counts rounds, not calls.
+MAX_ROUNDS = 8
+MAX_TOOL_CALLS = 24
+REPEAT_LIMIT = 3
+FAIL_STREAK_LIMIT = 3
 
 # Thinking is billed as completion tokens and can arrive for many seconds
 # before the first visible character (measured, ticket 16), so the panel shows it
@@ -75,9 +111,16 @@ def redact(text: str) -> str:
 
 
 class Message:
-    """One transcript entry. `text` is prose and is what the stream grows."""
+    """One transcript entry. `text` is prose and is what the stream grows.
 
-    __slots__ = ("role", "text", "kind", "detail", "status", "purpose", "expanded")
+    `call_id` is the wire `tool_call` this row reports, when it is a tool row. It
+    is what lets a result find the row that was drawn for it, which is the whole
+    mechanism behind "one permanent row per call, never removed" (ticket 08 §3).
+    """
+
+    __slots__ = (
+        "role", "text", "kind", "detail", "status", "purpose", "expanded", "call_id",
+    )
 
     def __init__(
         self,
@@ -88,6 +131,7 @@ class Message:
         status: str | None = None,
         purpose: str = "",
         expanded: bool = False,
+        call_id: str = "",
     ) -> None:
         self.role = role
         self.text = text
@@ -96,6 +140,7 @@ class Message:
         self.status = status
         self.purpose = purpose
         self.expanded = expanded
+        self.call_id = call_id
 
 
 def wrap(text: str, width: int = WRAP_CHARS) -> list[str]:
@@ -123,6 +168,66 @@ def gutter(text: str, prefix: str = "  ") -> list[str]:
     return [f"{prefix}{line}" for line in text.splitlines()]
 
 
+def _plain_arguments(call: dict) -> dict | None:
+    """The call's arguments as a dict, or None when they cannot be read.
+
+    Measured (ticket 16, and AGENTS.md): `tool_calls[].function.arguments`
+    arrives as a **JSON string, not an object**, and the worker concatenated it
+    from the SSE fragments. The loop needs the parsed form twice - to label the
+    row and to canonicalise a signature - so it parses here; `execution.py` parses
+    again to *validate*, which is a different question with a different answer.
+    """
+    raw = (call.get("function") or {}).get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _signature(call: dict) -> str:
+    """Tool plus canonical arguments: one call's identity, for the repeat detector.
+
+    Canonical, not literal: the same code with its keys in another order is the
+    same call, and a detector that could not see that would let a model spin by
+    reordering a dict.
+    """
+    function = call.get("function") or {}
+    arguments = _plain_arguments(call)
+    if arguments is None:
+        canonical = str(function.get("arguments"))
+    else:
+        canonical = json.dumps(arguments, sort_keys=True, default=str)
+    return f"{function.get('name') or ''} {canonical}"
+
+
+def _synthetic_result(tool: str, kind: str, message: str) -> dict:
+    """The loop's own result for a call that never ran.
+
+    Built here rather than in `execution.py` because it is not an execution: it is
+    the loop answering for a call the user stopped or a cap refused, and it has to
+    be constructible without Blender in the room.
+    """
+    envelope = {
+        "ok": False,
+        "tool": tool,
+        "summary": message,
+        "error": {"kind": kind, "message": message},
+    }
+    content = json.dumps(envelope, ensure_ascii=False)
+    return {
+        "ok": False,
+        "envelope": envelope,
+        "content": content,
+        "detail": json.dumps(envelope, ensure_ascii=False, indent=2),
+        "summary": message,
+    }
+
+
 class Conversation:
     def __init__(self) -> None:
         self.messages: list[Message] = []
@@ -130,6 +235,24 @@ class Conversation:
         # What is running *now*, for the Stop control: None | "stream" | "tool"
         self.busy_kind: str | None = None
         self.last_receipt: dict | None = None
+        # The wire transcript. Never the display transcript: see the module
+        # docstring for why they are two lists and not one.
+        self.history: list[dict] = []
+        # The loop (ticket 09 §0). `phase` is where in the turn we are; the rest is
+        # the ledger the caps are computed from and the queue the ticks drain.
+        self.phase = PHASE_IDLE
+        self.pending: list[dict] = []
+        self.send = None
+        self.execute = None
+        self.context = None
+        self._rows: dict = {}
+        self._rounds = 0
+        self._calls = 0
+        self._signatures: list[str] = []
+        self._round_open = False
+        self._round_calls = 0
+        self._round_failures = 0
+        self._fail_streak = 0
         # Reasoning characters seen this turn. Never shown as reply text; it
         # only moves the status between "waiting" and "thinking".
         self.reasoning_chars = 0
@@ -207,6 +330,12 @@ class Conversation:
     def status(self) -> str:
         # Deliberately terse: the header row shares the sidebar's width with the
         # "prototype" chip, and Blender middle-clips a label that does not fit.
+        #
+        # The running call is checked FIRST: between two queued calls the turn is
+        # still in flight with no stream to grow, and "running code" is what the
+        # Stop note underneath it is about.
+        if self.running_tool is not None:
+            return "running code"
         if self.streaming:
             if not self._reply_text():
                 return "thinking\u2026" if self.reasoning_chars else "waiting\u2026"
@@ -241,35 +370,56 @@ class Conversation:
     def begin_turn(self, prompt: str) -> None:
         """Open a turn: the user's message, then the empty assistant block the
         streamed reply grows into. Called after the request is on the wire and
-        before the drain timer starts, so no event can arrive without a turn."""
+        before the drain timer starts, so no event can arrive without a turn.
+
+        The round counter starts at 1 because the first request of the turn is
+        already in flight by the time this runs; `pump()` counts every round after
+        it.
+        """
         prompt = prompt.strip()
         if not prompt or self.streaming:
             return
         self.messages.append(Message("user", prompt))
         self.messages.append(Message("assistant", ""))
+        self.history.append({"role": "user", "content": prompt})
         self.streaming = True
+        self.phase = PHASE_REQUEST
         self.busy_kind = BUSY_STREAM
         self.reasoning_chars = 0
         self._reasoning_notch = 0
+        self._rows = {}
+        self.pending = []
+        self._rounds = 1
+        self._calls = 0
+        self._signatures = []
+        self._round_open = False
+        self._round_calls = 0
+        self._round_failures = 0
+        self._fail_streak = 0
 
     def append_text(self, text: str) -> bool:
-        if not self.streaming or not text:
+        # Only while a reply is actually streaming: a late delta arriving during
+        # TOOL_QUEUE would otherwise grow whatever row happens to be last.
+        if not self.streaming or self.phase != PHASE_REQUEST or not text:
             return False
         self.messages[-1].text += text
         return True
 
-    def finish_turn(self, reason: str | None = None) -> bool:
-        """Close a turn. `reason` is the provider's `finish_reason`, when known.
+    def finish_reply(self, reason: str | None = None, tool_calls: list | None = None) -> bool:
+        """A reply finished: either it asked for tools, or the turn is over.
 
-        `length` earns its own block: the reply is *incomplete*, which is a
-        different fact from "the model stopped", and thinking counts against the
-        same budget (ticket 16) so it can happen with no visible text at all.
+        `reason` is the provider's `finish_reason`; `tool_calls` is the accumulated
+        array the worker assembled from the fragmented deltas.
+
+        `length` is terminal whatever else arrived (ticket 09 §6): a truncated
+        `tool_calls` is *incomplete*, not wrong, so its calls are dropped rather
+        than half-run - and dropping them before they reach history is what keeps
+        the turn sendable again, because no id is then left unanswered.
         """
-        if not self.streaming:
+        if not self.streaming or self.phase != PHASE_REQUEST:
             return False
-        self.streaming = False
-        self.busy_kind = None
         if reason == "length":
+            self._end_turn()
             self._drop_empty_reply()
             self.messages.append(
                 Message(
@@ -280,7 +430,26 @@ class Conversation:
                     detail='{"finish_reason": "length"}',
                 )
             )
-        elif not self._reply_text():
+            return True
+
+        text = self._reply_text()
+        if tool_calls:
+            # The wire message goes in *before* anything runs: from here on, every
+            # id in it needs a matching `tool` result, and the provider enforces
+            # that (ticket 16, HTTP 400).
+            self.history.append(
+                {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
+            )
+            if not text:
+                self._drop_empty_reply()
+            self._queue_calls(tool_calls)
+            self.phase = PHASE_TOOL
+            self.busy_kind = BUSY_TOOL
+            return True
+
+        if text:
+            self.history.append({"role": "assistant", "content": text})
+        else:
             self._drop_empty_reply()
             self.messages.append(
                 Message(
@@ -289,6 +458,7 @@ class Conversation:
                     text="The model returned nothing. Nothing ran and nothing changed.",
                 )
             )
+        self._end_turn()
         return True
 
     def fail_turn(self, kind: str, message: str, detail: str = "") -> bool:
@@ -299,12 +469,14 @@ class Conversation:
         """
         if not self.streaming:
             return False
-        self.streaming = False
-        self.busy_kind = None
+        # A turn can end with calls still queued (the transport died mid-round).
+        # They still need answers, or the next send is refused.
+        self._flush_pending("not_run", "The turn ended before this call ran.")
         self._drop_empty_reply()
         self.messages.append(
             Message("assistant", kind=KIND_ERROR, text=redact(message), detail=redact(detail))
         )
+        self._end_turn()
         return True
 
     def set_transport_error(self, message: str | None) -> bool:
@@ -315,29 +487,37 @@ class Conversation:
         return True
 
     def wire_messages(self, user_text: str, base_prompt: str, summary: str) -> list[dict]:
-        """The request body: base prompt, the conversation, the prompt, the summary.
-
-        Only the transcript's **prose** becomes wire messages. Error blocks, code
-        blocks and tool rows are display, not conversation - sending an error
-        block back as an assistant turn would ask the model to continue from a
-        message it never wrote.
+        """The first request of a turn: base prompt, history, the prompt, the summary.
 
         The live summary is the **trailing** message rather than part of index 0
-        (ticket 14's correction to ticket 09 §4, confirmed accepted by the
-        provider in ticket 16), so the base prompt stays byte-identical across
-        turns and the provider's cache prefix survives.
+        (ticket 14's correction to ticket 09 §4, confirmed accepted by the provider
+        in ticket 16), so the base prompt stays byte-identical across turns and the
+        provider's cache prefix survives.
 
-        Ticket 14's degradation projection is deliberately **not** here: nothing
-        is trimmed or summarized, because with no tools a turn is a few hundred
-        bytes and the projection belongs with the store it is a projection *of*.
+        The new prompt is passed in rather than read from the transcript, and is
+        not appended to history here: `begin_turn` does that, and the caller builds
+        the request *before* opening the turn (otherwise the user's message would
+        be in both places). Rounds after the first are built by `pump` through
+        `build_messages`, where the history already ends with the tool results.
+
+        Ticket 14's degradation projection is deliberately **not** here: nothing is
+        trimmed or summarized, because the projection belongs with the store it is
+        a projection *of*.
+        """
+        return self.build_messages(base_prompt, summary, user_text)
+
+    def build_messages(
+        self, base_prompt: str, summary: str, user_text: str | None = None
+    ) -> list[dict]:
+        """The provider's message list: `[system, *history, (user), system]`.
+
+        The history dicts are copied shallowly, so a caller cannot reach back into
+        the stored conversation by holding on to the list it was handed.
         """
         messages: list[dict] = [{"role": "system", "content": base_prompt}]
-        for message in self.messages:
-            if message.kind == KIND_USER and message.text:
-                messages.append({"role": "user", "content": message.text})
-            elif message.kind == KIND_ASSISTANT and message.text:
-                messages.append({"role": "assistant", "content": message.text})
-        messages.append({"role": "user", "content": user_text.strip()})
+        messages.extend(dict(message) for message in self.history)
+        if user_text and user_text.strip():
+            messages.append({"role": "user", "content": user_text.strip()})
         messages.append({"role": "system", "content": summary})
         return messages
 
@@ -359,7 +539,9 @@ class Conversation:
                 return True
             return False
         if kind == "done":
-            return self.finish_turn(event.get("finish_reason"))
+            return self.finish_reply(
+                event.get("finish_reason"), event.get("tool_calls") or []
+            )
         if kind == "stopped":
             return self.cancel()
         if kind in ("error", "startup_failed", "exit"):
@@ -381,17 +563,31 @@ class Conversation:
         return False
 
     def cancel(self) -> bool:
-        """Stop the in-flight stream, keep what arrived, mark it stopped."""
+        """Stop the turn, keep what arrived, and leave the history sendable again.
+
+        Three cases, one rule (ticket 09 §5). A stream caught mid-reply keeps its
+        partial text and commits it. A stream caught before any text commits
+        nothing, so a cancelled turn cannot add an empty assistant message. And
+        calls that were queued but never ran get a synthetic `cancelled` result
+        each, because the assistant message that asked for them is already in
+        history and the provider rejects a call it cannot match (ticket 16).
+        """
         if not self.streaming:
             return False
-        self.streaming = False
-        self.busy_kind = None
-        if self.messages and self.messages[-1].kind == KIND_ASSISTANT:
+        self._flush_pending("cancelled", "Cancelled by user")
+        if (
+            self.phase == PHASE_REQUEST
+            and self.messages
+            and self.messages[-1].kind == KIND_ASSISTANT
+        ):
             marker = self.messages[-1]
             if marker.text:
-                marker.text = marker.text.rstrip() + " [stopped]"
+                partial = marker.text
+                marker.text = partial.rstrip() + " [stopped]"
+                self.history.append({"role": "assistant", "content": partial})
             else:
                 self._drop_empty_reply()
+        self._end_turn()
         return True
 
     def toggle(self, index: int) -> None:
@@ -399,13 +595,228 @@ class Conversation:
             message = self.messages[index]
             message.expanded = not message.expanded
 
+    # -- the loop (ticket 09 §0) ---------------------------------------------
+    def attach(self, send, execute, context) -> None:
+        """Wire the loop's three collaborators.
+
+        Nothing here may import `bpy` - the CPython checks are the only way to
+        exercise a turn at all, because `bpy.app.timers` never pump under
+        `blender -b` - so the bpy half is injected instead. `stream.py` supplies
+        the real ones; the checks supply fakes, through this same seam. The
+        contracts are deliberately tiny:
+
+          * `send(messages) -> str | None` - one request. A returned string is a
+            reason it could not be sent, and ends the turn.
+          * `execute(call) -> dict` - one tool call, returning `{ok, content,
+            detail, summary}`. `content` is the wire `tool` message, and the loop
+            never looks inside it.
+          * `context() -> (base_prompt, summary)` - the stable prompt and the live
+            scene summary, both read fresh for every request (ticket 09 §4).
+        """
+        self.send = send
+        self.execute = execute
+        self.context = context
+
+    def pump(self) -> bool:
+        """Exactly one bounded step of the turn's state machine, or nothing.
+
+        `stream.py` calls this once per timer tick and nothing else drives it.
+        That is what makes "at most one tool call per tick" true, and why it
+        matters is the `running…` row: exec is synchronous on the main thread, so
+        a tick that ran two calls could never paint the first one's row before the
+        second overwrote it.
+
+        The ticks a turn spends in `TOOL_QUEUE` are therefore one per call, plus
+        one at the end to either stop for a cap or ask for the next round.
+        """
+        if self.phase != PHASE_TOOL or self.execute is None:
+            return False
+        if not self.pending:
+            self._close_round()
+        reason = self._cap_reason()
+        if reason:
+            return self._stop_with(reason)
+        if self.pending:
+            self._run_call(self.pending.pop(0))
+            return True
+        return self._send_round()
+
+    def _send_round(self) -> bool:
+        """Ask for the next round. The reply arrives later, as events."""
+        if self.send is None or self.context is None:
+            return False
+        base_prompt, summary = self.context()
+        problem = self.send(self.build_messages(base_prompt, summary))
+        if problem:
+            # A round that cannot go out is a turn that cannot continue, and the
+            # same two-part answer as a worker that never started: the persistent
+            # transport block, and an error block closing the turn.
+            self.set_transport_error(problem)
+            self.fail_turn("worker_unavailable", problem)
+            return True
+        self._rounds += 1
+        self.phase = PHASE_REQUEST
+        self.busy_kind = BUSY_STREAM
+        self.reasoning_chars = 0
+        self._reasoning_notch = 0
+        self.messages.append(Message("assistant", ""))
+        return True
+
+    def _close_round(self) -> None:
+        """A round's calls have all been consumed: fold them into the ledger.
+
+        The consecutive-failure stop is a property of a *round*, so it can only be
+        decided here, once, at the boundary - not while calls are still running.
+        """
+        if not self._round_open:
+            return
+        self._round_open = False
+        if self._round_calls and self._round_failures == self._round_calls:
+            self._fail_streak += 1
+        else:
+            self._fail_streak = 0
+
+    def _cap_reason(self) -> str | None:
+        """Why the turn stops now, or None (ticket 09 §1).
+
+        Checked at the two boundaries a tick can stop at: before the next queued
+        call, and before the next request. Both are the `TOOL_QUEUE → REQUESTING`
+        boundary in the sense that matters - the turn cannot advance without
+        passing through them - and the call cap has to be checked *before* a call
+        runs or it would not bound a round that returns thirty of them.
+        """
+        if self._calls >= MAX_TOOL_CALLS:
+            return (
+                f"Stopped at the {MAX_TOOL_CALLS}-call limit for one turn. "
+                'Send "continue" to keep going.'
+            )
+        if self.pending:
+            if self._signatures.count(_signature(self.pending[0])) >= REPEAT_LIMIT - 1:
+                return (
+                    "Stopped: the same call was asked for a third time. "
+                    'Send "continue" to keep going.'
+                )
+            return None
+        if self._rounds >= MAX_ROUNDS:
+            return f'Stopped after {MAX_ROUNDS} rounds. Send "continue" to keep going.'
+        if self._fail_streak >= FAIL_STREAK_LIMIT:
+            return (
+                f"Stopped after {FAIL_STREAK_LIMIT} rounds in a row where every call "
+                'failed. Send "continue" to keep going.'
+            )
+        return None
+
+    def _stop_with(self, reason: str) -> bool:
+        """Stop for a cap and *report* it - never unwind a thing (ticket 09 §3).
+
+        What the turn did is on screen, the row's output is behind its expander,
+        and one Ctrl+Z is the only revert. The loop does not attempt a cleanup
+        call and does not synthesise a "partial success": `exec` is not
+        transactional and only the model can decide what to do about a half-applied
+        change.
+        """
+        self._flush_pending("not_run", reason)
+        self._end_turn()
+        self.messages.append(Message("assistant", kind=KIND_ERROR, text=reason))
+        return True
+
+    def _run_call(self, call: dict) -> None:
+        """Execute one queued call and put its result on both transcripts."""
+        self._calls += 1
+        self._signatures.append(_signature(call))
+        self._round_calls += 1
+        result = self.execute(call) or {}
+        if not result.get("ok"):
+            self._round_failures += 1
+        call_id = call.get("id") or ""
+        self.history.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": result.get("content") or "",
+            }
+        )
+        row = self._rows.get(call_id)
+        if row is not None:
+            row.status = STATUS_OK if result.get("ok") else STATUS_ERROR
+            row.detail = result.get("detail") or ""
+
+    def _flush_pending(self, kind: str, message: str) -> None:
+        """Answer every queued call that will never run.
+
+        Load-bearing rather than tidy (ticket 09 §5): the assistant message that
+        asked for these calls is already in history, and the provider refuses a
+        `tool_calls` it cannot match with a `tool` result - HTTP 400, "must be
+        followed by tool messages responding to each `tool_call_id`" (measured in
+        ticket 16). One flusher serves the Stop path, the cap path and the
+        transport-failure path, so none of them can leave an orphan behind.
+        """
+        while self.pending:
+            call = self.pending.pop(0)
+            call_id = call.get("id") or ""
+            tool = (call.get("function") or {}).get("name") or ""
+            result = _synthetic_result(tool, kind, message)
+            self.history.append(
+                {"role": "tool", "tool_call_id": call_id, "content": result["content"]}
+            )
+            row = self._rows.get(call_id)
+            if row is not None:
+                row.status = STATUS_ERROR
+                row.detail = result["detail"]
+
+    def _queue_calls(self, tool_calls: list) -> None:
+        """Put a round's calls on the queue and in the transcript.
+
+        Both rows of a call's audit trail are made here, while the call is still
+        `running…`: the code identity row (ticket 08 §2 - the panel shows what the
+        code *is*, and the full text lives in the `Copilot Code` datablock behind
+        `Show code`) and the permanent tool row the result will fill in.
+        """
+        self._round_open = True
+        self._round_calls = 0
+        self._round_failures = 0
+        for call in tool_calls:
+            function = call.get("function") or {}
+            arguments = _plain_arguments(call)
+            purpose = ""
+            code = None
+            if isinstance(arguments, dict):
+                purpose = str(arguments.get("purpose") or "").strip()
+                code = arguments.get("code")
+            label = purpose or function.get("name") or "tool call"
+            call_id = call.get("id") or ""
+            if isinstance(code, str) and code.strip():
+                code_row = Message(
+                    "assistant", kind=KIND_CODE, purpose=label, detail=code, call_id=call_id
+                )
+                self.messages.append(code_row)
+            row = Message(
+                "assistant",
+                kind=KIND_TOOL,
+                status=STATUS_RUNNING,
+                purpose=label,
+                call_id=call_id,
+            )
+            self.messages.append(row)
+            self._rows[call_id] = row
+            self.pending.append(call)
+
+    def _end_turn(self) -> None:
+        """Terminal state. Every path out of a turn comes through here, so no
+        path can leave `phase`, `streaming` and the queue disagreeing."""
+        self.streaming = False
+        self.phase = PHASE_IDLE
+        self.busy_kind = None
+        self.pending = []
+        self._round_open = False
+
     def clear(self) -> None:
         """Discard the conversation. Deliberately does **not** clear
         `transport_error`: whether the worker can run is not a property of the
         transcript."""
         self.messages.clear()
-        self.streaming = False
-        self.busy_kind = None
+        self.history.clear()
+        self._end_turn()
         self.last_receipt = None
         self.reasoning_chars = 0
         self._reasoning_notch = 0

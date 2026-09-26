@@ -23,12 +23,22 @@ Protocol, newline-delimited JSON over stdin/stdout.
       {"ev":"ready","pid":N}
       {"ev":"delta","id":N,"text":"..."}       visible reply text
       {"ev":"reasoning","id":N,"chars":N}      thinking: counted, never shown
-      {"ev":"done","id":N,"finish_reason":...}
+      {"ev":"done","id":N,"finish_reason":...}  the reply ended; also carries
+                                                 {"tool_calls":[...]} when the
+                                                 model asked for tools
       {"ev":"stopped","id":N}
       {"ev":"error","id":N,"kind":...,"status":N,"message":...,"detail":...}
       {"ev":"protocol_error","message":...}
 
 `id` is echoed so the parent can ignore an event from a turn it has abandoned.
+
+`tool_calls` ride on `done` rather than on their own event, deliberately. They are
+one atomic fact - the reply finished, and here is what it asked for - and a
+separate event could arrive after the parent had already decided the turn was
+over. The parent then has two things to do with them entirely on its own side:
+parse `function.arguments` (a JSON **string**, measured in ticket 16, not an
+object), and answer every `tool_call.id` with a `tool` message or the provider
+refuses the next request (HTTP 400, same measurement).
 
 Two threads, on purpose: the main thread owns the request and blocks inside
 `iter_lines()`, and a reader thread owns stdin so a `cancel` is *delivered*
@@ -85,6 +95,7 @@ class Session:
         self.api_key = command.get("api_key") or ""
         self.model = command.get("model") or ""
         self.messages = command.get("messages") or []
+        self.tools = command.get("tools") or []
         self.max_tokens = int(command.get("max_tokens") or 512)
         self.cancelled = threading.Event()
         self._response = None
@@ -114,6 +125,8 @@ class Session:
             "stream": True,
             "max_tokens": self.max_tokens,
         }
+        if self.tools:
+            payload["tools"] = self.tools
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -137,11 +150,18 @@ class Session:
             if response.status_code != 200:
                 emit(self._http_error(response))
                 return
-            finish_reason = self._consume(response)
+            finish_reason, tool_calls = self._consume(response)
             if self.cancelled.is_set():
                 emit({"ev": "stopped", "id": self.id})
                 return
-            emit({"ev": "done", "id": self.id, "finish_reason": finish_reason})
+            emit(
+                {
+                    "ev": "done",
+                    "id": self.id,
+                    "finish_reason": finish_reason,
+                    "tool_calls": tool_calls,
+                }
+            )
         except ServerError as exc:
             emit({"ev": "error", "id": self.id, "kind": "server",
                   "message": str(exc), "detail": ""})
@@ -158,16 +178,19 @@ class Session:
             with self._lock:
                 self._response = None
 
-    def _consume(self, response) -> str | None:
-        """Read the SSE stream. Returns the provider's `finish_reason`, if one came.
+    def _consume(self, response) -> tuple[str | None, list[dict]]:
+        """Read the SSE stream. Returns the `finish_reason` and the tool calls.
 
-        The accumulation rules are ticket 03 §2: `content` concatenates, `[DONE]`
-        ends. Tool-call deltas are deliberately *ignored* rather than
-        half-accumulated: no tools are declared in this pass, so one arriving is
-        not expected, and the tools pass owns the fragmented-`arguments` rule and
-        the synthetic results that must accompany it (ticket 09 §5).
+        The accumulation rules are ticket 03 §2, with the shapes ticket 16
+        measured: `content` concatenates, `[DONE]` ends. Tool calls arrive as
+        **fragments** in `delta.tool_calls`, each carrying the `index` of its slot
+        in the final array; `id`, `type` and `function.name` arrive once and the
+        `function.arguments` fragments must be **concatenated**. What comes out is
+        therefore a JSON *string*, which is what the provider sends and what the
+        parent has to expect.
         """
         finish_reason = None
+        slots: dict[int, dict] = {}
         for line in response.iter_lines(decode_unicode=True):
             if self.cancelled.is_set():
                 break
@@ -200,7 +223,35 @@ class Session:
                 # makes "waiting" honest during a long think - so only the count
                 # crosses the pipe, never the text.
                 emit({"ev": "reasoning", "id": self.id, "chars": len(reasoning)})
-        return finish_reason
+            for fragment in delta.get("tool_calls") or []:
+                self._accumulate(slots, fragment)
+        return finish_reason, [slots[index] for index in sorted(slots)]
+
+    @staticmethod
+    def _accumulate(slots: dict, fragment: dict) -> None:
+        """Fold one `delta.tool_calls` fragment into its slot.
+
+        `index` is the slot in the final array, and the first fragment for a slot
+        is usually the only one carrying `id` and `name`. Everything is `.get`-
+        guarded because a provider is free to split the fields across chunks
+        differently, and a KeyError here would take down the whole turn.
+        """
+        index = fragment.get("index")
+        if not isinstance(index, int):
+            index = 0
+        slot = slots.setdefault(
+            index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+        )
+        if fragment.get("id"):
+            slot["id"] = fragment["id"]
+        if fragment.get("type"):
+            slot["type"] = fragment["type"]
+        function = fragment.get("function") or {}
+        if function.get("name"):
+            slot["function"]["name"] = function["name"]
+        arguments = function.get("arguments")
+        if arguments:
+            slot["function"]["arguments"] += arguments
 
     # -- failures ------------------------------------------------------------
     def _http_error(self, response) -> dict:

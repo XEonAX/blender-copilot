@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, prompt, stream, transport
+from . import conversation, prompt, stream, toolbox, transport
 
 CATEGORY = "Copilot"
 NON_HOST_AREAS = {"TEXT_EDITOR", "PREFERENCES", "STATUSBAR", "TOPBAR"}
@@ -177,7 +177,7 @@ class BLENDER_COPILOT_OT_send(bpy.types.Operator):
         # of the transcript - opening the turn first would send the user's own
         # message twice.
         messages = prompt.messages_for(session, text)
-        problem = transport.worker.send(config, messages)
+        problem = transport.worker.send(config, messages, toolbox.SCHEMAS)
         if problem:
             session.set_transport_error(problem)
             stream.tag_view3d_redraw()

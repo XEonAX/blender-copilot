@@ -270,8 +270,14 @@ class Worker:
             return f"The worker pipe closed: {type(exc).__name__}"
         return None
 
-    def send(self, cfg: Config, messages: list) -> str | None:
-        """Start a turn. Never blocks; `ready` is not awaited (ticket 11)."""
+    def send(self, cfg: Config, messages: list, tools: list | None = None) -> str | None:
+        """Start a turn. Never blocks; `ready` is not awaited (ticket 11).
+
+        `tools` is the OpenAI tool array. It is passed in rather than imported so
+        this module keeps knowing nothing about what the tools *are* - and it is
+        sent every round, not just the first, because a round without the
+        declaration is a round the model cannot call anything from.
+        """
         reason = self.start()
         if reason:
             return reason
@@ -279,17 +285,18 @@ class Worker:
         self._inflight = True
         self._cancel_deadline = None
         self._deliberate_kill = False
-        return self._write(
-            {
-                "cmd": "send",
-                "id": self._turn,
-                "base_url": cfg.base_url,
-                "api_key": cfg.api_key,
-                "model": cfg.model,
-                "messages": messages,
-                "max_tokens": MAX_TOKENS,
-            }
-        )
+        command = {
+            "cmd": "send",
+            "id": self._turn,
+            "base_url": cfg.base_url,
+            "api_key": cfg.api_key,
+            "model": cfg.model,
+            "messages": messages,
+            "max_tokens": MAX_TOKENS,
+        }
+        if tools:
+            command["tools"] = tools
+        return self._write(command)
 
     def cancel(self) -> None:
         """Ask, then - if the child does not answer within the grace - kill."""
