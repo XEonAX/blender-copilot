@@ -27,11 +27,6 @@ import re
 WRAP_CHARS = 38
 BOX_WRAP_CHARS = 34
 
-# A Panel cannot scroll, so a transcript page is bounded and the rest is
-# reached with explicit Older / Newer buttons. Budget is in rendered lines,
-# whole messages only, so a page never cuts a turn in half.
-PAGE_LINES = 34
-
 # The log variant's flat line budget (kept for the original prototype tests).
 VISIBLE_LINES = 26
 
@@ -134,7 +129,6 @@ class Conversation:
         self.streaming = False
         # What is running *now*, for the Stop control: None | "stream" | "tool"
         self.busy_kind: str | None = None
-        self.page = 0  # 0 = newest page; larger = further back
         self.last_receipt: dict | None = None
         # Reasoning characters seen this turn. Never shown as reply text; it
         # only moves the status between "waiting" and "thinking".
@@ -185,51 +179,6 @@ class Conversation:
             dropped = len(lines) - VISIBLE_LINES
             lines = [f"... {dropped} earlier lines dropped"] + lines[-VISIBLE_LINES:]
         return lines
-
-    # -- rendering: paging ---------------------------------------------------
-    def _cost(self, message: Message) -> int:
-        """Paging cost is computed as if every detail row were collapsed, so
-        expanding a code block never reflows the page under the user."""
-        if message.kind in (KIND_CODE, KIND_TOOL, KIND_ERROR):
-            return 2
-        width = WRAP_CHARS if message.role == "user" else WRAP_CHARS - 2
-        return max(1, len(wrap(message.text, width))) + 1
-
-    def _pages(self, budget: int = PAGE_LINES) -> list[list[Message]]:
-        """Whole-message pages packed from the *newest* end, so the page the
-        user actually sees first is full and the oldest page holds leftovers."""
-        pages: list[list[Message]] = []
-        current: list[Message] = []
-        used = 0
-        for message in reversed(self.messages):
-            cost = self._cost(message)
-            if current and used + cost > budget:
-                pages.append(list(reversed(current)))
-                current = []
-                used = 0
-            current.append(message)
-            used += cost
-        if current:
-            pages.append(list(reversed(current)))
-        pages.reverse()
-        return pages or [[]]
-
-    def page_view(self, budget: int = PAGE_LINES) -> tuple[list[Message], int, bool, bool]:
-        """A whole-message page plus (hidden_before, has_older, has_newer)."""
-        pages = self._pages(budget)
-        index = max(0, min(len(pages) - 1, len(pages) - 1 - self.page))
-        self.page = len(pages) - 1 - index
-        hidden = sum(len(page) for page in pages[:index])
-        return pages[index], hidden, index > 0, index < len(pages) - 1
-
-    def older(self) -> None:
-        self.page += 1
-
-    def newer(self) -> None:
-        self.page = max(0, self.page - 1)
-
-    def newest(self) -> None:
-        self.page = 0
 
     # -- rendering: full export ---------------------------------------------
     def transcript_text(self) -> str:
@@ -302,7 +251,6 @@ class Conversation:
         self.busy_kind = BUSY_STREAM
         self.reasoning_chars = 0
         self._reasoning_notch = 0
-        self.newest()
 
     def append_text(self, text: str) -> bool:
         if not self.streaming or not text:
@@ -458,7 +406,6 @@ class Conversation:
         self.messages.clear()
         self.streaming = False
         self.busy_kind = None
-        self.page = 0
         self.last_receipt = None
         self.reasoning_chars = 0
         self._reasoning_notch = 0

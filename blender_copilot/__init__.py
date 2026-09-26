@@ -24,8 +24,6 @@ _classes = (
     panel.BLENDER_COPILOT_OT_toggle_detail,
     panel.BLENDER_COPILOT_OT_show_code,
     panel.BLENDER_COPILOT_OT_open_transcript,
-    panel.BLENDER_COPILOT_OT_page_older,
-    panel.BLENDER_COPILOT_OT_page_newer,
     panel.BLENDER_COPILOT_OT_enable_global_undo,
     panel.BLENDER_COPILOT_OT_retry_transport,
     panel.BLENDER_COPILOT_PT_panel,

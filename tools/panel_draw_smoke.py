@@ -152,7 +152,6 @@ def main() -> None:
             for expanded in (False, True):
                 for message in conversation.session.messages:
                     message.expanded = expanded
-                conversation.session.newest()
                 log: list = []
                 layout = StubLayout(log)
                 # The stub context has no `region`, so wrap_budget falls back to
@@ -207,10 +206,16 @@ def main() -> None:
         conversation.session.set_transport_error(None)
 
         # A failed API call and a running tool must both be reachable by drawing.
-        conversation.session.older()
-        page, _, _, _ = conversation.session.page_view()
-        kinds = [m.kind for m in page]
-        print("ok   older page renders kinds:", sorted(set(kinds)))
+        # With the pager gone this is ONE pass over the whole transcript, which
+        # makes the check stronger than it was: nothing can hide on a page nobody
+        # turned to. The icons are the stub's record of what the panel said about
+        # each state - ERROR and TIME are its own vocabulary for the two.
+        log = []
+        instance._draw_boxes(StubLayout(log), context, panel.wrap_budget(context))
+        icons = {entry[2] for entry in log if entry[0] == "label"}
+        assert "ERROR" in icons, log
+        assert "TIME" in icons, log
+        print("ok   the whole transcript draws: error block and running tool included")
 
         # Stop replaces Send only while a turn is in flight.
         conversation.session.begin_turn("check the stop slot")

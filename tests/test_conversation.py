@@ -160,24 +160,20 @@ rendered = roles.visible_lines()
 check("user lines are marked", rendered[0].startswith(">"))
 check("assistant lines are marked", "| there" in rendered)
 
-# ---------------------------------------------------------------- paging
-paged = conversation.Conversation()
-for index in range(12):
-    paged.messages.append(conversation.Message("user", f"turn {index}"))
-    paged.messages.append(conversation.Message("assistant", f"reply {index}"))
-page, hidden, has_older, has_newer = paged.page_view()
-check("the newest page is last", page[-1].text == "reply 11")
-check("a long transcript has an older page", has_older and hidden > 0)
-check("the newest page has no newer page", not has_newer)
-paged.older()
-older_page, older_hidden, _, older_has_newer = paged.page_view()
-check("Older moves back exactly one page", older_hidden < hidden)
-check("Older names the newer direction", older_has_newer)
-paged.newest()
-check("newest returns to the end", paged.page_view()[1] == hidden)
-check("pages keep whole turns", all(len(page) <= len(paged.messages) for page in paged._pages()))
-paged.newer()
-check("newer clamps at the newest page", paged.page == 0)
+# ---------------------------------------------------------------- no pager
+# The pager lost at the 2026-09-26 visual pass: the whole transcript renders and
+# the sidebar REGION scrolls. These guard the public surface, because the failure
+# they prevent is the *unused* pager - the thing that let two contradictory
+# designs sit in one file and both read as live.
+check("no page-size constant", not hasattr(conversation, "PAGE_LINES"))
+check("a session has no page cursor", not hasattr(conversation.Conversation(), "page"))
+check(
+    "no paging on the conversation",
+    not any(
+        hasattr(conversation.Conversation, name)
+        for name in ("page_view", "older", "newer", "newest")
+    ),
+)
 
 # ---------------------------------------------------------------- kinds
 rich = conversation.Conversation()
@@ -205,16 +201,6 @@ exported = rich.transcript_text()
 check("the export keeps code verbatim", "scale = 1.3" in exported)
 check("the export keeps tracebacks verbatim", "TypeError" in exported)
 check("the export is not truncated", not exported.startswith("..."))
-
-# ---------------------------------------------------------------- stable paging
-stable = conversation.Conversation()
-stable.messages.extend(conversation._demo())
-before = [len(page) for page in stable._pages()]
-for message in stable.messages:
-    message.expanded = not message.expanded
-check("expanding detail never reflows the page", [len(page) for page in stable._pages()] == before)
-for message in stable.messages:
-    message.expanded = False
 
 # ---------------------------------------------------------------- cancel
 running = conversation.Conversation()

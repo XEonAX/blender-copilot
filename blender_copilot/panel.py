@@ -295,30 +295,6 @@ class BLENDER_COPILOT_OT_open_transcript(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class BLENDER_COPILOT_OT_page_older(bpy.types.Operator):
-    bl_idname = "blender_copilot.page_older"
-    bl_label = "Older"
-    bl_description = "Show earlier turns"
-    bl_options = {"INTERNAL"}
-
-    def execute(self, context):
-        conversation.session.older()
-        stream.tag_view3d_redraw()
-        return {"FINISHED"}
-
-
-class BLENDER_COPILOT_OT_page_newer(bpy.types.Operator):
-    bl_idname = "blender_copilot.page_newer"
-    bl_label = "Newer"
-    bl_description = "Show later turns"
-    bl_options = {"INTERNAL"}
-
-    def execute(self, context):
-        conversation.session.newer()
-        stream.tag_view3d_redraw()
-        return {"FINISHED"}
-
-
 class BLENDER_COPILOT_OT_enable_global_undo(bpy.types.Operator):
     bl_idname = "blender_copilot.enable_global_undo"
     bl_label = "Turn Global Undo on"
@@ -558,17 +534,10 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
 
     # -- variant: role boxes (chosen) ---------------------------------------
     def _draw_boxes(self, layout, context, budget):
-        # No pager. The human visual pass of 2026-09-26 rejected bounded pages in
-        # favour of emitting everything and letting the sidebar REGION scroll -
-        # the panel cannot scroll itself, but the region it lives in can. So the
-        # whole transcript renders here.
-        #
-        # `session.page_view`, `_pages`, `PAGE_LINES`, `session.page` and the two
-        # page operators are now unreachable from the UI. They are deliberately
-        # NOT deleted in the same pass, because their unit checks would have to be
-        # removed with them and that is a separate, self-contained change. Named
-        # here so the next reader does not find two contradictory designs and have
-        # to work out which one is live.
+        # No pager, and none left to switch back to. The human visual pass of
+        # 2026-09-26 rejected bounded pages in favour of emitting everything and
+        # letting the sidebar REGION scroll - the panel cannot scroll itself, but
+        # the region it lives in can. So the whole transcript renders here.
         messages = conversation.session.messages
         index_of = {id(message): i for i, message in enumerate(messages)}
         for turn in _turns(messages):
@@ -661,7 +630,8 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
 
 
 def _turns(messages):
-    """Group the page into turns: a user message starts one, assistant parts join."""
+    """Group the transcript into turns: a user message starts one, assistant
+    parts join."""
     turns = []
     for message in messages:
         if message.kind == conversation.KIND_USER or not turns:
