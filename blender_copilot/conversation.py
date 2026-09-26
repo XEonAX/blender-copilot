@@ -38,6 +38,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import sys
 from pathlib import Path
 
 
@@ -47,20 +48,31 @@ def _sibling(name: str):
     The same problem `execution._sibling` solves: the CPython suite and the probes
     load these modules by path, with no package around them, so a plain
     `from . import context` is not always available.
+
+    Reuse before reloading: a loader that has already read `<name>.py` by path
+    registers it as `bc_<name>`, and this must resolve to that same object. It is
+    not an optimisation - `budget.Exceeded` is caught by class identity in
+    `execution.run_python`, so two copies of the module would be two unrelated
+    exception classes and the catch would silently miss.
     """
     try:
         return importlib.import_module(f".{name}", __package__)
     except Exception:  # noqa: BLE001 - any failure here means "load it by path"
+        cached = sys.modules.get(f"bc_{name}")
+        if cached is not None:
+            return cached
         path = Path(__file__).with_name(f"{name}.py")
         spec = importlib.util.spec_from_file_location(f"bc_{name}", path)
         if spec is None or spec.loader is None:  # pragma: no cover - defensive
             raise ImportError(f"cannot load {name} from {path}")
         module = importlib.util.module_from_spec(spec)
+        sys.modules[f"bc_{name}"] = module
         spec.loader.exec_module(module)
         return module
 
 
 context = _sibling("context")
+budget = _sibling("budget")
 
 # Rough character budget for one panel label. 5.2.2 gives a panel no wrapping
 # control, no monospace font and no rich text, so long lines are wrapped by
@@ -268,6 +280,29 @@ def _synthetic_result(tool: str, kind: str, message: str) -> dict:
     }
 
 
+def _budget_verdict(result: dict) -> dict:
+    """The budget verdict inside a tool result, when there is one worth acting on.
+
+    Read out of the **envelope** and not out of the guard object, deliberately. The
+    loop must not know what a signal is: the sandbox owns the alarm, and the only
+    thing the loop needs is the verdict the sandbox put in the result - which is
+    also what lets `tests/test_conversation.py` drive this path with a fake
+    executor rather than with a real fifteen-second loop.
+
+    Returns `{}` for the ordinary case (the call ran inside its budget), so the
+    caller's test is truthiness and not a comparison of six fields.
+    """
+    envelope = result.get("envelope")
+    if not isinstance(envelope, dict):
+        envelope = _envelope(result.get("content"))
+    if not isinstance(envelope, dict):
+        return {}
+    verdict = envelope.get("budget")
+    if not isinstance(verdict, dict):
+        return {}
+    return verdict if budget.stopped(verdict) else {}
+
+
 def _envelope(content) -> dict | None:
     """A tool result's envelope, when it parses. On the wire it is JSON text."""
     if isinstance(content, dict):
@@ -403,6 +438,11 @@ class Conversation:
         # The undo side, if a session has one wired: `open_turn(text)` when a turn
         # starts and `close_turn()` when it ends. See `attach`.
         self.undo = None
+        # The budget the turn's clock runs on (build ticket 07). The *same* object
+        # the sandbox opens a call window on - `budget.LIMITS` for the running
+        # addon - so "60 s per turn" is one ledger and not two. Assignable, so a
+        # check can run against short numbers instead of sleeping for a minute.
+        self.limits = budget.LIMITS
         self._rows: dict = {}
         self._rounds = 0
         self._calls = 0
@@ -602,6 +642,10 @@ class Conversation:
         # open: nothing between here and the first tool call touches the scene.
         if self.undo is not None:
             self.undo.open_turn(prompt)
+        # The turn's clock, opened after the undo record for the same reason: the
+        # budget is what bounds the *work*, and everything a turn does to the scene
+        # happens after this point.
+        self.limits.begin_turn()
 
     def append_text(self, text: str) -> bool:
         # Only while a reply is actually streaming: a late delta arriving during
@@ -948,7 +992,11 @@ class Conversation:
         if reason:
             return self._stop_with(reason)
         if self.pending:
-            self._run_call(self.pending.pop(0))
+            reason = self._run_call(self.pending.pop(0))
+            if reason:
+                # The call did not run inside its budget: the turn stops here for
+                # the same reason a cap does - the loop reports, and never unwinds.
+                return self._stop_with(reason)
             return True
         return self._send_round()
 
@@ -1031,8 +1079,14 @@ class Conversation:
         self.messages.append(Message("assistant", kind=KIND_ERROR, text=reason))
         return True
 
-    def _run_call(self, call: dict) -> None:
-        """Execute one queued call and put its result on both transcripts."""
+    def _run_call(self, call: dict) -> str | None:
+        """Execute one queued call and put its result on both transcripts.
+
+        Returns a reason to stop the turn when the call's budget verdict says it
+        was not bounded (build ticket 07) - an interrupt that took, a raise the
+        code swallowed, or a budget the code switched off. `None` is the ordinary
+        case and the common one: the call ran inside its budget.
+        """
         self._calls += 1
         self._signatures.append(_signature(call))
         self._round_calls += 1
@@ -1051,6 +1105,8 @@ class Conversation:
         if row is not None:
             row.status = STATUS_OK if result.get("ok") else STATUS_ERROR
             row.detail = result.get("detail") or ""
+        verdict = _budget_verdict(result)
+        return budget.stopped_sentence(verdict) if verdict else None
 
     def _flush_pending(self, kind: str, message: str) -> None:
         """Answer every queued call that will never run.
@@ -1138,6 +1194,11 @@ class Conversation:
             # interrupted turn still leaves a revertible step.
             if self.undo is not None:
                 self.undo.close_turn()
+            # The budget's turn clock, closed on the same funnel and for the same
+            # reason: a turn that ended at its budget still ended, and the next
+            # turn must start with a full 60 s rather than inheriting the last
+            # one's overspend.
+            self.limits.end_turn()
 
     def clear(self) -> None:
         """Discard the conversation. Deliberately does **not** clear

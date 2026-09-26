@@ -26,6 +26,7 @@ from __future__ import annotations
 import bpy
 
 from . import (
+    budget,
     context,
     conversation,
     prompt,
@@ -240,9 +241,12 @@ class BLENDER_COPILOT_OT_stop(bpy.types.Operator):
     bl_idname = "blender_copilot.stop"
     bl_label = "Stop"
     bl_description = (
-        "Stop the in-flight stream and keep what arrived. A running tool call "
-        "cannot be stopped: bpy executes on the main thread and Blender does "
-        "not pump events while it runs"
+        "Stop the reply and the rest of the turn. A tool call that is already "
+        "running cannot be stopped by this button - bpy executes on the main "
+        "thread and Blender does not pump events while it runs - so the call "
+        "ends at its own budget instead. A single long Blender or NumPy call "
+        "is only stopped once it returns, and code that catches the interrupt "
+        "cannot be stopped at all"
     )
     bl_options = {"INTERNAL"}
 
@@ -428,6 +432,15 @@ MIN_WRAP_CHARS = 12
 # characters with the shared budget (`logs/context-trim.png`), and this is the
 # margin that fixed it.
 NOTE_WRAP_INSET = 8
+# An error row's first line is drawn with the `ERROR` icon beside it, and the icon
+# costs horizontal space that the line's character count does not include.
+# MEASURED on screen 2026-09-26, 5.2.2, by `tools/budget_panel_probe.py`: at the
+# default sidebar width a 33-character first line next to that icon was middle-
+# clipped to "⏱ Stopped after 2.0s \u2014 the co\u2026" while a 36-character line
+# *without* an icon (the running note's, in the same run) drew whole - in the one
+# row whose entire job is saying what happened. Wrapping early costs a line break;
+# wrapping late costs the sentence.
+ERROR_ICON_INSET = 5
 
 
 def wrap_budget(context) -> int:
@@ -600,7 +613,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             placeholder="Ask Blender...",
         )
 
-    def _draw_actions(self, layout, context, budget):
+    def _draw_actions(self, layout, context, wrap_chars):
         session = conversation.session
         row = layout.row(align=True)
         paused = bool(undo_blender.pause_reason(context))
@@ -618,12 +631,15 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         row.operator("blender_copilot.clear", text="Clear", icon="TRASH")
 
         if session.running_tool is not None:
-            # Name both cases rather than claiming a blanket "cannot be
-            # interrupted" (measured in ticket 17: SIGALRM stops `while True:
-            # pass`, `time.sleep` and a blocking recv at 1.04x overhead, and
-            # cannot stop a long native call until it returns).
+            # The note is the budget's own copy (`budget.RUNNING_LINES`), because
+            # the sentences and the numbers are one contract and a second copy
+            # here is how a panel starts promising something the code does not do.
+            # It is drawn BEFORE the call starts and cannot be repainted while it
+            # runs, so it carries the whole thing up front - what stops, what only
+            # stops once it returns, that Stop cannot be delivered, and what to do
+            # when the code does not stop at all.
             #
-            # Every line is short and inside a box on purpose. Blender
+            # Every line is wrapped and inside a box on purpose. Blender
             # MIDDLE-CLIPS a label that does not fit, which is how the first
             # version of this note shipped reading "running code - c...ed until
             # it returns". No headless test can catch that: the stub UILayout
@@ -633,17 +649,8 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             head = note.row()
             head.enabled = False
             head.label(text="running code", icon="TIME")
-            # Wrapped like every other piece of prose. These lines were hard-coded
-            # single labels, and the owner's NARROW screenshot caught the 38
-            # characters of the third one overflowing a ~295 px sidebar as
-            # "A Python loop can, with a call ...". Fixed strings are not exempt
-            # from the width.
-            for line in (
-                "Click waits until the call returns.",
-                "A blocking C call never stops.",
-                "A Python loop can, with a call budget.",
-            ):
-                for chunk in conversation.wrap(line, budget):
+            for line in budget.RUNNING_LINES:
+                for chunk in conversation.wrap(line, wrap_chars):
                     note.label(text=chunk)
 
     def _draw_coverage(self, layout, budget):
@@ -748,8 +755,16 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             # error but a mangling of it, in the state that most needs to be
             # legible. Every other kind already draws a short title with the full
             # text behind an expander; errors were the lone exception.
+            #
+            # The first line carries an icon, so it wraps earlier than the prose
+            # around it (`ERROR_ICON_INSET`) - measured, not guessed: see the
+            # constant. The second and later lines have no icon and would fit at
+            # the shared budget, but they are wrapped to the same measure on
+            # purpose, because two indents in one paragraph reads as a mistake.
             for position, chunk in enumerate(
-                conversation.wrap(message.text, budget)
+                conversation.wrap(
+                    message.text, max(MIN_WRAP_CHARS, budget - ERROR_ICON_INSET)
+                )
             ):
                 box.label(text=chunk, icon="ERROR" if position == 0 else "NONE")
             if message.detail:

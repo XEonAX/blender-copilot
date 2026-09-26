@@ -16,10 +16,28 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import signal
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 _HERE = Path(__file__).resolve().parent
+
+# `budget.py` FIRST, and registered under the name `execution._sibling` and
+# `conversation._sibling` resolve to. `run_python` catches `budget.Exceeded` by
+# class identity, so a second copy of the module - which is what loading by path
+# gives you for free - would be a second, unrelated exception class and the catch
+# would silently miss. One module object, deliberately, before anything that
+# imports it is loaded.
+_budget_spec = importlib.util.spec_from_file_location(
+    "bc_budget", _HERE.parent / "blender_copilot" / "budget.py"
+)
+assert _budget_spec and _budget_spec.loader
+budget = importlib.util.module_from_spec(_budget_spec)
+sys.modules["bc_budget"] = budget
+_budget_spec.loader.exec_module(budget)
+
 _spec = importlib.util.spec_from_file_location(
     "conversation", _HERE.parent / "blender_copilot" / "conversation.py"
 )
@@ -657,6 +675,395 @@ check(
 )
 stopped2.begin_turn("again")
 check("and the next turn appends to a valid history", len(stopped2.history) == 3)
+
+
+# ==========================================================================
+# The budget (build ticket 07). Ticket 17 measured *which constructs* a wall-clock
+# SIGALRM budget stops - a pure-Python loop, a sleep and a blocked read yes; a
+# long native call only once it returns; a code path that swallows the raise or
+# disarms the timer not at all. Those measurements are transcribed, not re-made
+# here: what these checks cover is the *rule* built on them - the two clocks, the
+# sentences, and what the loop does with a verdict.
+#
+# The checks that arm a real alarm use short numbers and short polls rather than
+# the shipped 15 s / 60 s, because a check that sleeps for a minute is a check
+# nobody runs. The shipped numbers are checked as copy, and the constructs are
+# re-measured on the installed Blender by `tools/budget_probe.py`.
+# ==========================================================================
+print("\n-- the budget --")
+
+running_copy = " ".join(budget.RUNNING_LINES)
+check(
+    "the panel's running copy names the per-call figure",
+    f"{int(budget.CALL_SECONDS)}s" in running_copy,
+)
+check(
+    "and the per-turn figure",
+    f"{int(budget.TURN_SECONDS)}s" in running_copy,
+)
+check(
+    "the shipped figures are ticket 17's, not a tune-up",
+    (budget.CALL_SECONDS, budget.TURN_SECONDS) == (15.0, 60.0),
+)
+check(
+    "the copy promises a pure-Python loop stops",
+    "loop" in running_copy and "stops at the budget" in running_copy,
+)
+check(
+    "it does not claim a native call stops once it has started",
+    "only stops once it returns" in running_copy,
+)
+check(
+    "it says Stop cannot be delivered while the code runs",
+    "cannot be delivered" in running_copy,
+)
+check(
+    "and it says what cannot be stopped at all",
+    "swallows the interrupt" in running_copy and "switches the budget off" in running_copy,
+)
+
+_previous_handler = signal.getsignal(signal.SIGALRM)
+
+# A pure-Python infinite loop. The case ticket 17 measured as stoppable, and the
+# one this ticket is named after.
+spinner = budget.Limits(call_seconds=0.15, turn_seconds=5.0, poll=0.05)
+spins = 0
+started = time.monotonic()
+try:
+    with spinner.call():
+        while True:
+            spins += 1
+except budget.Exceeded as caught:
+    loop_stop = caught
+else:  # pragma: no cover - the failure being tested for
+    loop_stop = None
+loop_seconds = time.monotonic() - started
+check("a plain infinite loop is interrupted at all", loop_stop is not None and spins > 1_000)
+check("at its own budget rather than after it", 0.1 <= loop_seconds < 0.6)
+check("and the interrupt says which budget it was", loop_stop.kind == budget.KIND_CALL)
+check(
+    "the timer is off again once the call is over",
+    signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0),
+)
+check(
+    "and the handler the session had before is back",
+    signal.getsignal(signal.SIGALRM) is _previous_handler,
+)
+
+# A blocking call that *is* stoppable - ticket 17 measured `time.sleep` and a
+# blocking `recv` at 1.00 s, which is why the panel's copy must not say "a
+# blocking C call never stops" any more.
+napper = budget.Limits(call_seconds=0.15, turn_seconds=5.0, poll=0.05)
+started = time.monotonic()
+try:
+    with napper.call():
+        time.sleep(5)
+except budget.Exceeded:
+    slept = True
+else:  # pragma: no cover - the failure being tested for
+    slept = False
+check("a sleep is interrupted too, not waited out", slept and time.monotonic() - started < 1.0)
+
+# The swallow case, bounded so the check terminates: the first interrupt is
+# caught, and the *next* one - one tick later - is not, because it lands outside
+# the `try`. That is the whole reason the alarm repeats.
+greedy = budget.Limits(call_seconds=0.15, turn_seconds=5.0, poll=0.05)
+swallowed = []
+try:
+    with greedy.call():
+        try:
+            while True:
+                pass
+        except budget.Exceeded:
+            swallowed.append("caught")
+        while True:
+            pass
+except budget.Exceeded as caught_again:
+    second_stop = caught_again
+else:  # pragma: no cover - the failure being tested for
+    second_stop = None
+check(
+    "code that catches the interrupt is interrupted again",
+    swallowed == ["caught"] and second_stop is not None,
+)
+check("so catching it buys one tick, not the rest of the call", second_stop.interrupts >= 2)
+
+# Disarming. Both ways to switch the budget off that ticket 17 measured, and the
+# answer is the same in both: notice it, and say so, because it cannot be
+# prevented from inside the process.
+thief = budget.Limits(call_seconds=5.0, turn_seconds=60.0, poll=0.05)
+with thief.call():
+    signal.setitimer(signal.ITIMER_REAL, 0)
+check("code that switches the timer off is noticed", thief.verdict()["disarmed"] is True)
+check("and the verdict does not pretend it was interrupted", thief.verdict()["interrupted"] is False)
+replacer = budget.Limits(call_seconds=5.0, turn_seconds=60.0, poll=0.05)
+with replacer.call():
+    signal.signal(signal.SIGALRM, signal.SIG_IGN)
+check("so is code that replaces the handler", replacer.verdict()["disarmed"] is True)
+check("and the handler is restored afterwards", signal.getsignal(signal.SIGALRM) is _previous_handler)
+
+# The turn's clock, cumulative across calls. The call's own limit is far away, so
+# the only thing that can end this sleep is the turn's.
+capped = budget.Limits(call_seconds=10.0, turn_seconds=0.15, poll=0.05)
+capped.begin_turn()
+try:
+    with capped.call():
+        time.sleep(5)
+except budget.Exceeded as caught_by_turn:
+    turn_stop = caught_by_turn
+else:  # pragma: no cover - the failure being tested for
+    turn_stop = None
+check("the turn's cumulative budget ends a call early", turn_stop is not None)
+check("and it says so, rather than blaming the call", turn_stop.kind == budget.KIND_TURN)
+check("against the turn's remaining seconds", turn_stop.limit <= 0.16)
+capped.end_turn()
+check("the turn's clock stops with the turn", capped.turn_open is False)
+check("the next turn starts it again", capped.begin_turn() is True and capped.turn_open)
+
+# A turn whose budget is already spent refuses the next call *before it runs*, and
+# the loop stops the turn on that refusal. This is the one path where the guard is
+# never armed - there is no window to arm - so a "was this a stop?" test that
+# demanded a live alarm would silently ignore it and let the loop collect refusals
+# up to the caps instead. That is a hole this check closed rather than a case it
+# documents: the first version of `budget.stopped` required `armed`, and this is
+# the check that failed.
+spent = budget.Limits(call_seconds=10.0, turn_seconds=0.3, poll=0.05)
+spent.begin_turn()
+try:
+    with spent.call():
+        time.sleep(5)
+except budget.Exceeded:
+    pass
+refused = execution.run_python("print('never runs')", "One more call", {}, limits=spent)
+check("a call that starts after the turn's budget is gone is refused", refused["ok"] is False)
+check(
+    "and the envelope names the budget",
+    refused["envelope"]["error"]["kind"] == "budget"
+    and refused["envelope"]["error"]["budget_kind"] == budget.KIND_TURN,
+)
+check("the code never ran", "never runs" not in (refused["envelope"]["stdout"] or ""))
+check(
+    "and the model is told nothing ran, rather than that something was interrupted",
+    "No code ran" in (refused["envelope"]["note"] or ""),
+)
+check(
+    "and the loop reads that refusal as a stop",
+    conversation._budget_verdict(refused) != {},
+)
+spent_turn = conversation.Conversation()
+wire(spent_turn, FakeSender(), execute=lambda call: refused)
+spent_turn.begin_turn("one more call")
+deliver(spent_turn, calls=[wire_call("sp1", "One more call", "print('never runs')")])
+spent_turn.pump()
+check("so a refused call ends the turn too", not spent_turn.streaming)
+check("and the panel says which budget was gone", "call time" in spent_turn.messages[-1].text)
+
+# The same, through the sandbox: what the model's code gets told about it.
+limit_stop = execution.run_python(
+    "print('before')\nwhile True:\n    pass",
+    "Loop forever",
+    {},
+    limits=budget.Limits(call_seconds=0.15, turn_seconds=5.0, poll=0.05),
+)
+check("the sandbox reports the interrupt instead of raising it", limit_stop["ok"] is False)
+check(
+    "the envelope calls it a budget stop, not a traceback",
+    limit_stop["envelope"]["error"]["kind"] == "budget",
+)
+check(
+    "and says how long the code actually ran",
+    0.1 <= limit_stop["envelope"]["error"]["seconds"] < 1.0,
+)
+check(
+    "what it printed before the interrupt is kept",
+    limit_stop["envelope"]["stdout"].strip() == "before",
+)
+check(
+    "the model is told the call did not finish",
+    "budget" in (limit_stop["envelope"]["note"] or ""),
+)
+check("the wire content is a valid envelope", json.loads(limit_stop["content"])["ok"] is False)
+
+# And the swallow path through the sandbox: the call *returns*, so it is not an
+# error, but it is not a clean call either. The poll is long and the budget short
+# on purpose - the interrupt is delivered once, inside the `try`, and the code is
+# back before the next tick can fire.
+limit_swallow = execution.run_python(
+    "try:\n"
+    "    while True:\n"
+    "        pass\n"
+    "except BaseException:\n"
+    "    print('caught it')\n",
+    "Swallow the interrupt",
+    {},
+    limits=budget.Limits(call_seconds=0.15, turn_seconds=5.0, poll=2.0),
+)
+check("code that swallows the interrupt still returns a result", limit_swallow["ok"] is True)
+check(
+    "but the result says an interrupt was delivered",
+    limit_swallow["envelope"]["budget"]["interrupts"] >= 1,
+)
+check(
+    "and it is not reported as a clean call",
+    "caught" in (limit_swallow["envelope"]["note"] or ""),
+)
+check("the code's own output is still there", "caught it" in limit_swallow["envelope"]["stdout"])
+
+# The loop's half: a call that ran past its budget ends the turn, answers the
+# call it was running, and sends no further request. What the loop reads is the
+# envelope, which is why a fake executor can stand in for Blender here.
+def budget_verdict(**over):
+    verdict = {
+        "kind": budget.KIND_CALL,
+        "seconds": 0.2,
+        "limit": budget.CALL_SECONDS,
+        "interrupts": 1,
+        "interrupted": True,
+        "late": False,
+        "disarmed": False,
+        "armed": True,
+    }
+    verdict.update(over)
+    return verdict
+
+
+class Recorder:
+    """The undo seam, counted. Same protocol as `undo_blender`."""
+
+    def __init__(self):
+        self.opened: list[str] = []
+        self.closed = 0
+
+    def open_turn(self, text: str) -> bool:
+        self.opened.append(text)
+        return True
+
+    def close_turn(self) -> bool:
+        self.closed += 1
+        return True
+
+
+stopped_running = conversation.Conversation()
+stopped_running_undo = Recorder()
+stopped_running_sender = FakeSender()
+wire(
+    stopped_running,
+    stopped_running_sender,
+    execute=lambda call: execution.run_python(
+        "while True:\n    pass",
+        "Loop forever",
+        {},
+        limits=budget.Limits(call_seconds=0.15, turn_seconds=5.0, poll=0.05),
+    ),
+    undo=stopped_running_undo,
+)
+stopped_running.begin_turn("make it spin")
+deliver(stopped_running, calls=[wire_call("z1", "Loop forever", "while True:\n    pass")])
+stopped_running.pump()
+check(
+    "the interrupted call's row is an error, not a running row",
+    stopped_running._rows["z1"].status == conversation.STATUS_ERROR,
+)
+check(
+    "the turn ended rather than asking for another round",
+    not stopped_running.streaming and stopped_running.phase == conversation.PHASE_IDLE,
+)
+check(
+    "and no second request went out",
+    not stopped_running_sender.sent,
+)
+check(
+    "the interrupted call is answered, so history stays sendable",
+    unanswered(stopped_running.history) == [],
+)
+check(
+    "the panel says the code ran past its budget",
+    "past its budget" in stopped_running.messages[-1].text,
+)
+check(
+    "and it does not claim the turn was cleaned up",
+    stopped_running.messages[-1].kind == conversation.KIND_ERROR,
+)
+check(
+    "an interrupted turn still closes its undo record, so Ctrl+Z has a step",
+    stopped_running_undo.closed == 1,
+)
+
+# The turn's clock is the session's, not a second one built per call: the loop
+# opens it when a turn starts and closes it when the turn ends, whatever ended it.
+clocked = conversation.Conversation()
+clocked.limits = budget.Limits(call_seconds=15.0, turn_seconds=60.0)
+wire(clocked, FakeSender())
+clocked.begin_turn("open the clock")
+check("a turn opens the budget's turn clock", clocked.limits.turn_open is True)
+clocked.cancel()
+check("and ending the turn closes it", clocked.limits.turn_open is False)
+
+
+# Code that caught the interrupt: the call returned, so nothing was interrupted -
+# but the budget did not bound it, and the loop stops the turn rather than buying
+# the model another round with a mechanism it has shown it can ignore.
+lax = conversation.Conversation()
+lax_undo = Recorder()
+wire(
+    lax,
+    FakeSender(),
+    execute=lambda call: {
+        "ok": True,
+        "envelope": {"ok": True, "budget": budget_verdict(interrupted=False)},
+        "content": '{"ok": true}',
+        "detail": '{\n  "ok": true\n}',
+        "summary": "caught it",
+    },
+    undo=lax_undo,
+)
+lax.begin_turn("try to catch it")
+deliver(lax, calls=[wire_call("w1", "Swallow the interrupt", "pass")])
+lax.pump()
+check("a swallowed interrupt still ends the turn", not lax.streaming)
+check("and the panel names what happened", "caught the interrupt" in lax.messages[-1].text)
+check("with the undo step still written", lax_undo.closed == 1)
+
+thief_turn = conversation.Conversation()
+wire(
+    thief_turn,
+    FakeSender(),
+    execute=lambda call: {
+        "ok": True,
+        "envelope": {
+            "ok": True,
+            "budget": budget_verdict(interrupted=False, interrupts=0, disarmed=True),
+        },
+        "content": '{"ok": true}',
+        "detail": '{\n  "ok": true\n}',
+        "summary": "switched the timer off",
+    },
+)
+thief_turn.begin_turn("switch it off")
+deliver(thief_turn, calls=[wire_call("v1", "Disarm", "pass")])
+thief_turn.pump()
+check("code that switched the budget off ends the turn too", not thief_turn.streaming)
+check(
+    "and the panel says the budget was switched off, not that it fired",
+    "switched the budget off" in thief_turn.messages[-1].text,
+)
+
+# A clean call is still a clean call: the guard must not turn every turn into a
+# stop.
+clean = conversation.Conversation()
+clean_sender = FakeSender()
+wire(clean, clean_sender, execute=lambda call: execution.run_python("print('fine')", "Fine", {}))
+clean.begin_turn("just look")
+deliver(clean, calls=[wire_call("n1", "Fine", "print('fine')")])
+clean.pump()
+check(
+    "a call inside its budget is not stopped",
+    clean.streaming and clean.phase == conversation.PHASE_TOOL,
+)
+check("and its row is ok", clean._rows["n1"].status == conversation.STATUS_OK)
+clean.pump()
+check("so the loop does ask for the next round", len(clean_sender.sent) == 1)
+check("and the turn is streaming again", clean.phase == conversation.PHASE_REQUEST)
 
 
 # The caps. Each one stops the turn AND says so.

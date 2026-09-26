@@ -24,10 +24,12 @@ sys.path.insert(0, str(ROOT))
 import bpy  # noqa: E402
 import blender_copilot as bc  # noqa: E402
 from blender_copilot import (  # noqa: E402
+    budget,
     context as context_module,
     conversation,
     execution,
     panel,
+    prompt,
     scope,
     toolbox,
     undo,
@@ -213,19 +215,19 @@ def main() -> None:
                 # the fixed measure - which is the point: this proves the draw
                 # bodies RUN, not that they fit. Fitting is checked by
                 # long_labels/longest_label below and, ultimately, by an eye.
-                budget = panel.wrap_budget(context)
+                wrap = panel.wrap_budget(context)
                 if variant == "log":
                     instance._draw_log(layout, context)
                 elif variant == "external":
                     instance._draw_external(layout, context)
                 else:
-                    instance._draw_boxes(layout, context, budget)
+                    instance._draw_boxes(layout, context, wrap)
                 instance._draw_header(layout, context)
-                instance._draw_transport(layout, budget)
-                instance._draw_receipt(layout, budget)
+                instance._draw_transport(layout, wrap)
+                instance._draw_receipt(layout, wrap)
                 instance._draw_input(layout, context, settings)
-                instance._draw_actions(layout, context, budget)
-                instance._draw_coverage(layout, budget)
+                instance._draw_actions(layout, context, wrap)
+                instance._draw_coverage(layout, wrap)
                 instance._draw_variant_picker(layout, settings)
                 worst = long_labels(log)
                 longest = longest_label(log)
@@ -282,6 +284,116 @@ def main() -> None:
         instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
         assert ("operator", "blender_copilot.send", "Send") in log, log
         print("ok   Stop replaces Send only while a turn is in flight")
+
+        # --- the budget's copy on screen (build ticket 07) --------------------
+        # The running-call note is the *whole* contract, because it is drawn
+        # before the call starts and the panel cannot be repainted while the call
+        # runs: what stops, what only stops once it returns, that Stop cannot be
+        # delivered, and what to do when the code does not stop at all. Ticket 17
+        # measured each of those, and every one of them is a claim about pixels.
+        #
+        # The one copy lives in `budget.py`; this checks that the panel draws it
+        # rather than a second, hand-typed version of it.
+        conversation.session.begin_turn("show the running note")
+        log = []
+        instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
+        joined = " ".join(entry[1] for entry in log if entry[0] == "label")
+        assert all(line in joined for line in budget.RUNNING_LINES), joined
+        assert f"{budget.CALL_SECONDS:.0f}s per call" in joined, joined
+        assert f"{budget.TURN_SECONDS:.0f}s per turn" in joined, joined
+        assert "stops at the budget" in joined, joined
+        assert "only stops once it returns" in joined, joined
+        assert "cannot be delivered" in joined, joined
+        assert "swallows the interrupt" in joined, joined
+        assert "force-quit" in joined, joined
+        assert longest_label(log) <= LABEL_SOFT_LIMIT, longest_label(log)
+        print(
+            "ok   the running-call note draws the budget's own copy: what stops, "
+            "what does not, and what Stop cannot do"
+        )
+
+        # And the note is *only* there while a call is running: a panel that shows
+        # the budget contract over an idle input is noise, and worse, it reads as
+        # if something were running.
+        #
+        # The fixture's last row is a permanently `running` tool (it is a static
+        # transcript, so nothing will ever answer it), which is why the row itself
+        # is parked rather than the turn being ended: `running_tool` is a property
+        # of the transcript, and in the live loop every path out of a turn answers
+        # its queued calls, so this state cannot arise there.
+        parked = conversation.session.running_tool
+        assert parked is not None, "the fixture should still carry its running row"
+        parked.status = conversation.STATUS_OK
+        log = []
+        instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
+        idle = " ".join(entry[1] for entry in log if entry[0] == "label")
+        assert "running code" not in idle, idle
+        assert "Budget:" not in idle, idle
+        parked.status = conversation.STATUS_RUNNING
+        log = []
+        instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
+        assert "running code" in " ".join(entry[1] for entry in log if entry[0] == "label")
+        print("ok   and it goes again when nothing is running")
+        # The turn this block opened is closed before anything else is drawn:
+        # `streaming` is what decides whether the row offers Stop or Send, and the
+        # checks below are about Send.
+        assert conversation.session.cancel() is True
+
+        # The sentence for a call that was actually interrupted is drawn as the
+        # turn's last row. Built by the real rule, from a real verdict, so a
+        # change to `budget.stopped_sentence` reaches this check.
+        conversation.session.messages.append(
+            conversation.Message(
+                "assistant",
+                kind=conversation.KIND_ERROR,
+                text=budget.stopped_sentence(
+                    {
+                        "armed": True,
+                        "kind": budget.KIND_CALL,
+                        "seconds": 3.2,
+                        "limit": budget.CALL_SECONDS,
+                        "interrupts": 1,
+                        "interrupted": True,
+                        "late": False,
+                        "disarmed": False,
+                    }
+                ),
+            )
+        )
+        assert conversation.session.messages[-1].text.startswith(budget.MARK_STOPPED)
+        log = []
+        instance._draw_boxes(StubLayout(log), context, panel.wrap_budget(context))
+        drawn = " ".join(entry[1] for entry in log if entry[0] == "label")
+        assert "ran past its budget" in drawn, drawn
+        assert "3.2s" in drawn, drawn
+        assert longest_label(log) <= LABEL_SOFT_LIMIT, longest_label(log)
+        print("ok   a stopped call's sentence draws, with the seconds it actually ran")
+        conversation.session.messages.pop()
+
+        # The two numbers are one contract, and they appear in three places: the
+        # budget, the tool description the model reads, and the base prompt. Two of
+        # the three are text, so they can drift without a test noticing; this is
+        # that test. (The panel's copy is drawn above and comes from `budget`.)
+        assert f"{budget.CALL_SECONDS:.0f}s" in execution.RUN_BLENDER_PYTHON_SCHEMA["function"]["description"]
+        assert f"{budget.TURN_SECONDS:.0f}s" in execution.RUN_BLENDER_PYTHON_SCHEMA["function"]["description"]
+        assert "no time limit" not in execution.RUN_BLENDER_PYTHON_SCHEMA["function"]["description"]
+        assert "cannot be cancelled" not in execution.RUN_BLENDER_PYTHON_SCHEMA["function"]["description"]
+        assert "15 seconds" in prompt.BASE_PROMPT, prompt.BASE_PROMPT[:40]
+        assert "60" in prompt.BASE_PROMPT
+        assert "force-quit" in prompt.BASE_PROMPT
+        print(
+            "ok   the tool description and the prompt name the same two figures "
+            "as the budget, and neither still promises no time limit"
+        )
+
+        # One ledger, two halves. `run_python` catches `budget.Exceeded` by class
+        # identity and the loop opens the turn on `session.limits`, so if the
+        # package ever resolved two copies of `budget.py` the turn clock and the
+        # call window would be two different 60 s figures - and the failure would
+        # be a silently unbounded turn, not an exception anyone would see.
+        assert conversation.session.limits is budget.LIMITS, conversation.session.limits
+        assert execution.budget.LIMITS is budget.LIMITS, execution.budget.LIMITS
+        print("ok   both halves share one budget object, so there is one 60s ledger")
 
         # Where the conversation is filed, and the two actions on the record
         # itself (build ticket 04). The scope on screen in *this* run is the

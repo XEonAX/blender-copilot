@@ -80,21 +80,38 @@ def _sibling(name: str):
     path, with no package around it, so a plain `from . import guides` is not
     always available. Try the package first (the addon's own case, and the GUI
     probes'), then the file next to this one.
+
+    The package branch is a relative import of `name`, not of `guides`: the file
+    is imported twice, by two different module names, because `budget.LIMITS` has
+    to be the *same* object in `execution` and in `conversation` (the call window
+    and the turn's clock are two views of one ledger) - and when this module is
+    loaded by path the two halves each get their own copy, which is why the
+    identity is asserted in `tools/panel_draw_smoke.py` rather than assumed.
+
+    The `bc_` branch is what makes that true under the CPython suite, which has no
+    package: a loader that has already read `budget.py` by path registers it as
+    `bc_budget`, and both halves then resolve to that one object instead of
+    loading a third. The two copies are otherwise indistinguishable, which is
+    exactly how an `isinstance` against the wrong copy would go unnoticed.
     """
     try:
-        from . import guides  # type: ignore[import-not-found]
-        return guides
-    except ImportError:
+        return importlib.import_module(f".{name}", __package__)
+    except Exception:  # noqa: BLE001 - any failure here means "load it by path"
+        cached = sys.modules.get(f"bc_{name}")
+        if cached is not None:
+            return cached
         path = Path(__file__).with_name(f"{name}.py")
         spec = importlib.util.spec_from_file_location(f"bc_{name}", path)
         if spec is None or spec.loader is None:  # pragma: no cover - defensive
             raise ImportError(f"cannot load {name} from {path}")
         module = importlib.util.module_from_spec(spec)
+        sys.modules[f"bc_{name}"] = module
         spec.loader.exec_module(module)
         return module
 
 
 guides = _sibling("guides")
+budget = _sibling("budget")
 
 RUN_PYTHON = "run_blender_python"
 SCENE_INFO = "get_scene_info"
@@ -155,8 +172,14 @@ RUN_BLENDER_PYTHON_SCHEMA = {
             "Run Python inside the live Blender session and return its output as JSON. "
             "The code runs on Blender's main thread with the full bpy API and NO sandbox: "
             "it can read and change the user's scene, write files and reach the network. "
-            "It cannot be cancelled and has no time limit, so a `while True:` loop freezes "
-            "Blender - keep every call short and do one meaningful thing. `bpy`, `C` "
+            f"A call is interrupted at {budget.CALL_SECONDS:.0f}s, and a turn may spend "
+            f"{budget.TURN_SECONDS:.0f}s running code in total. The interrupt reaches "
+            "pure Python, `time.sleep` and a blocked read; a single long Blender or "
+            "NumPy call is only stopped once it returns, and code that catches the "
+            "interrupt or disables the alarm cannot be stopped at all - so the user "
+            "may have to force-quit Blender. Blender's UI is frozen while a call runs "
+            "and nothing you print reaches it. Keep every call short and do one "
+            "meaningful thing. `bpy`, `C` "
             "(bpy.context), `D` (bpy.data), `math` and `Vector`/`Matrix`/`Euler`/`Quaternion` "
             "are already bound, as in the Python Console. Check an operator's return value: "
             "a refused call returns {'CANCELLED'} silently. On failure the reply carries the "
@@ -416,13 +439,25 @@ def _model_line(error: BaseException) -> int | None:
     return line
 
 
-def run_python(code: str, purpose: str, bindings: dict) -> dict:
+def run_python(code: str, purpose: str, bindings: dict, limits=None) -> dict:
     """Exec `code` with a fresh namespace and return the envelope.
 
     Never raises on the model's behalf: anything the code throws - including
     `SystemExit` and `KeyboardInterrupt` - is caught as `BaseException` and
     reported, because a raised exception here would take the loop with it.
+
+    **The budget is opened here and nowhere else**, because this is the only place
+    that knows exactly which block of work is the model's: the window covers
+    `exec` and nothing after it, so the elision, the JSON and the loop's own
+    bookkeeping can never be interrupted by an alarm that was meant for the code.
+    A raise that lands in this function's own body would be a bug in the budget
+    rather than a stop, and the narrow window is what makes that structurally
+    impossible instead of merely unlikely.
+
+    `limits` defaults to the process's one instance (`budget.LIMITS`), which is the
+    same object the loop opens the turn on; the checks pass their own.
     """
+    limits = limits if limits is not None else budget.LIMITS
     stdout = io.StringIO()
     stderr = io.StringIO()
     truncated = False
@@ -433,13 +468,21 @@ def run_python(code: str, purpose: str, bindings: dict) -> dict:
     previous_main = sys.modules.get("__main__")
     previous_stdin = sys.stdin
     error = None
+    stopped = None
     try:
         # `compile` separately, so a SyntaxError carries lineno/offset.
         compiled = compile(code, FILENAME, "exec")
         sys.modules["__main__"] = module
         sys.stdin = _EofStdin()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            exec(compiled, module.__dict__)
+        with limits.call():
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exec(compiled, module.__dict__)
+    except budget.Exceeded as exc:
+        # The budget, and not a failure of the code. It is caught here rather than
+        # allowed to escape because the loop's contract with the tool layer is
+        # "a result, never an exception" - and because catching it here is what
+        # turns it into a sentence the model can read on the next turn.
+        stopped = exc
     except BaseException as exc:  # noqa: BLE001 - the whole point is to report it
         error = exc
     finally:
@@ -453,6 +496,45 @@ def run_python(code: str, purpose: str, bindings: dict) -> dict:
     err_text, err_cut = elide(stderr.getvalue(), STDERR_CAP, head_weight=0.0)
     truncated = out_cut or err_cut
 
+    verdict = limits.verdict()
+    if budget.stopped(verdict):
+        # Two different worlds behind one condition, and the verdict says which:
+        # the call was unwound by the interrupt, or the code ignored it and came
+        # back anyway. Both belong in the envelope, because both mean the call did
+        # not run under the bound it was supposed to.
+        note = budget.verdict_note(verdict)
+
+    if stopped is not None:
+        formatted = "".join(
+            traceback.format_exception(type(stopped), stopped, stopped.__traceback__)
+        ).strip()
+        detail = {
+            "kind": "budget",
+            "budget_kind": stopped.kind,
+            "seconds": round(stopped.seconds, 3),
+            "limit": round(stopped.limit, 3),
+            "interrupts": stopped.interrupts,
+            "late": verdict.get("late", False),
+            "message": str(stopped),
+            "traceback": elide(formatted, TRACEBACK_CAP, head_weight=0.0)[0],
+        }
+        if out_text:
+            detail["stdout_before_error"] = out_text
+        envelope = {
+            "ok": False,
+            "tool": RUN_PYTHON,
+            "summary": f"{purpose} \u2014 stopped by its {stopped.limit:.0f}s budget",
+            "status": "error",
+            "purpose": purpose,
+            "stdout": out_text,
+            "stderr": err_text,
+            "truncated": truncated,
+            "note": note,
+            "error": detail,
+            "budget": verdict,
+        }
+        return _result(envelope)
+
     if error is None:
         envelope = {
             "ok": True,
@@ -463,9 +545,11 @@ def run_python(code: str, purpose: str, bindings: dict) -> dict:
             "stdout": out_text,
             "stderr": err_text,
             "truncated": truncated,
-            "note": None,
+            "note": note,
             "error": None,
         }
+        if note:
+            envelope["budget"] = verdict
         return _result(envelope)
 
     formatted = "".join(
@@ -497,6 +581,10 @@ def run_python(code: str, purpose: str, bindings: dict) -> dict:
         "note": note,
         "error": detail,
     }
+    if note:
+        # The code raised, but only after ignoring an interrupt - the budget ran
+        # out and the failure is downstream of that. Both facts travel.
+        envelope["budget"] = verdict
     return _result(envelope)
 
 
@@ -1429,13 +1517,16 @@ def prelude(world) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def execute_tool(call: dict, world=None) -> dict:
+def execute_tool(call: dict, world=None, limits=None) -> dict:
     """Run one wire tool call. Never raises; always returns the loop's shape.
 
     `world` is the bpy side: `toolbox.LiveWorld` in Blender, a fake under
     `tests/test_conversation.py`. It is read lazily - `prelude()` only on a
     `run_blender_python` call - so dispatching costs nothing until something is
     actually run or read.
+
+    `limits` is the budget seam: the two reader tools cannot run arbitrary code,
+    so the only call that opens a budget window is the one that execs.
     """
     function = call.get("function") or {}
     name = function.get("name") or ""
@@ -1477,4 +1568,4 @@ def execute_tool(call: dict, world=None) -> dict:
             name, f"`purpose` is {len(purpose)} characters; the maximum is {PURPOSE_MAX}."
         )
 
-    return run_python(code, purpose, prelude(world))
+    return run_python(code, purpose, prelude(world), limits=limits)
