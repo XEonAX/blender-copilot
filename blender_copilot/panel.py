@@ -203,15 +203,6 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
         default=True,
     )
 
-    show_context: bpy.props.BoolProperty(
-        name="Context details",
-        description=(
-            "Show the context viewer expanded in the panel: what this request is made "
-            "of, what it costs, and what the projection is doing to it"
-        ),
-        default=False,
-    )
-
     # Ticket 14 §1's lever, and the only setting that reads the budget. 0 ships,
     # because the derivation is now the better answer: it is sized from the
     # provider's own window rather than from the 32k floor the design assumed. The
@@ -478,18 +469,47 @@ class BLENDER_COPILOT_OT_toggle_detail(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class BLENDER_COPILOT_OT_toggle_context(bpy.types.Operator):
-    bl_idname = "blender_copilot.toggle_context"
-    bl_label = "Toggle context details"
-    bl_description = "Show or hide the context viewer's breakdown"
+class BLENDER_COPILOT_OT_context_popover(bpy.types.Operator):
+    """The context viewer, drawn as a popover rather than inline.
+
+    An **operator** popup, not a `Panel` popover, and that is a measured decision
+    rather than a preference. The obvious route is `layout.popover(panel=...)`, which is
+    what Blender's own code uses (`startup/bl_ui/space_node.py:210`), but a popover
+    panel has to declare a region the space actually owns: `bl_region_type = "TEMPORARY"`
+    - the region Blender reserves for exactly this - is **rejected at registration** on
+    5.2.2 with `RuntimeError: Error: Region not found in space type` (measured
+    2026-09-26, and it is not a guess: the first version of this class used it). The
+    workable alternative, `"HEADER"`, also makes Blender draw the panel *in the 3D View
+    header*, which is not where a context readout belongs.
+
+    `WindowManager.invoke_popup` has no such constraint: it opens a floating popup
+    drawn by this operator's own `draw`, which is the same widget the user's screenshot
+    of VS Code's Session Info resembles.
+    """
+
+    bl_idname = "blender_copilot.context_popover"
+    bl_label = "Context Window"
+    bl_description = (
+        "What the next request is made of, what it costs, and what the projection "
+        "is doing to the conversation"
+    )
     bl_options = {"INTERNAL"}
 
+    def invoke(self, context, event):
+        # A pixel width, because a popup has no region to measure. 520 px is about a
+        # sidebar and a half: the split line and the notes need the room, and it is
+        # still narrow enough to read without moving the eyes far.
+        return context.window_manager.invoke_popup(self, width=CONTEXT_POPUP_WIDTH)
+
+    def draw(self, context):
+        # `self.layout` is the operator's own layout - the mechanism every
+        # `invoke_props_dialog` popup uses. Wrapped at the POPUP's width, not the
+        # sidebar's: `wrap_budget` answers about the region this popup is floating over,
+        # which is what an earlier version passed in, and it wrapped a 520 px popup at a
+        # 335 px measure.
+        draw_context_details(self.layout, wrap_chars(CONTEXT_POPUP_WIDTH, context))
+
     def execute(self, context):
-        settings = prefs(context)
-        if settings is None:
-            return {"CANCELLED"}
-        settings.show_context = not settings.show_context
-        stream.tag_view3d_redraw()
         return {"FINISHED"}
 
 
@@ -625,6 +645,23 @@ NOTE_WRAP_INSET = 8
 ERROR_ICON_INSET = 5
 
 
+def wrap_chars(width: float, context) -> int:
+    """Characters that fit in `width` pixels of UI at the current `ui_scale`.
+
+    Split out of `wrap_budget` when the context viewer became a popup: a popup has no
+    region to measure, and the version that reused the region's answer wrapped a 520 px
+    popup at a 335 px measure.
+    """
+    if width <= UI_INSET_PX:
+        return conversation.BOX_WRAP_CHARS
+    scale = 1.0
+    try:
+        scale = float(context.preferences.system.ui_scale) or 1.0
+    except Exception:
+        pass
+    return max(MIN_WRAP_CHARS, int((width - UI_INSET_PX) / (PX_PER_CHAR * scale)))
+
+
 def wrap_budget(context) -> int:
     """Characters that fit on one line of the panel at its CURRENT width.
 
@@ -635,12 +672,7 @@ def wrap_budget(context) -> int:
     width = getattr(getattr(context, "region", None), "width", 0) or 0
     if width <= UI_INSET_PX:
         return conversation.BOX_WRAP_CHARS
-    scale = 1.0
-    try:
-        scale = float(context.preferences.system.ui_scale) or 1.0
-    except Exception:
-        pass
-    return max(MIN_WRAP_CHARS, int((width - UI_INSET_PX) / (PX_PER_CHAR * scale)))
+    return wrap_chars(width, context)
 
 
 # ---------------------------------------------------------------------------
@@ -709,6 +741,10 @@ CONTEXT_WARN_LINE = (
     "Quality may decline as the limit nears. Compact to give the model fewer "
     "older turns."
 )
+# The popup's width in pixels. A constant because three things must agree about it:
+# the popup that is opened, the measure its prose is wrapped at, and the probe that
+# photographs it.
+CONTEXT_POPUP_WIDTH = 520
 _CONTEXT_REPORT: dict = {"key": None, "report": None}
 
 
@@ -887,7 +923,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         # Below the transcript, with the other meta-information rather than in the live
         # cluster: it is about the *request*, it is collapsed to one line by default,
         # and the two blocks under it say what happens to the record itself.
-        self._draw_context(layout, budget, settings)
+        self._draw_context(layout, budget)
         self._draw_coverage(layout, budget)
         self._draw_history(layout, budget)
         self._draw_variant_picker(layout, settings)
@@ -1100,129 +1136,53 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             for line in budget.RUNNING_LINES:
                 prose(note, conversation.wrap(line, wrap_chars))
 
-    def _draw_context(self, layout, budget, settings):
-        """What the next request is made of, what it costs, and what the projection does to it.
+    def _draw_context(self, layout, budget):
+        """The context row: how full the window is, and a way into the details.
 
-        Shaped after VS Code's `chatContextUsageDetails.ts` - the same header pair
-        (used / window tokens, then a whole-number percentage), the same single
-        progress bar with the **reserved output** drawn as a second, separate segment,
-        and the same 75%/90% thresholds. Two things necessarily differ, and both are
-        stated on screen rather than papered over:
+        One row and one bar, plus a popover button. The breakdown itself lives in
+        `BLENDER_COPILOT_PT_context` rather than inline, and VS Code is the reason:
+        its Session Info is a popover too, and the shape is not a coincidence - a
+        panel that cannot scroll itself should not spend five rows of an unbounded
+        column on a diagnostic.
 
-        * The token figures here are *converted from bytes* at
-          `context.BYTES_PER_TOKEN`, so they are prefixed `\\u2248`. VS Code's come from
-          its fetch layer as counts. When the provider reports a real count this draw
-          shows it as well, as measured.
-        * The per-category percentages are shares of **this request**, where VS Code
-          displays them as shares of the **window** (`(percentageOfPrompt / 100) *
-          contextWindowPercentage`). At VS Code's fill level the two are nearly the
-          same number; here the request is around 1% of the window, so window-relative
-          shares would be five rows of "0.0%" - true, and useless. The header shows the
-          window-relative figure, the rows show request-relative, and both say which.
+        MEASURED, 2026-09-26, and this is what settled it: drawn inline, the expanded
+        block pushed the record and layout blocks below the fold of a 775 px sidebar
+        (`logs/context-view-expanded.png`), so the diagnostic was costing the user
+        sight of the controls underneath it. A popover costs nothing when it is closed.
 
-        Collapsed to one line by default: it is a diagnostic, and a panel that cannot
-        scroll itself should not spend a third of its height on diagnostics. The
-        collapsed line carries the two numbers worth glancing at, plus VS Code's
-        warning colour once the window is 75% full - so the common questions ("am I near
-        the limit?" and "is anything wrong?") cost no click.
-
-        Every figure comes from `context_report()`, i.e. from the projection itself. The
-        categories are `context.USAGE_CATEGORIES`, so the arithmetic and the labels live
-        in the bpy-free module the CPython suite can disagree with, and this method only
-        decides how they are stacked.
+        The row keeps the two numbers worth a glance without opening anything, plus
+        VS Code's warning colour once the window is 75% full, so "am I near the limit?"
+        and "is anything wrong?" are both answered with the popover shut.
         """
         report = context_report()
         box = layout.box()
-        expanded = bool(getattr(settings, "show_context", False))
         fraction = report["fraction"]
-        reserve_fraction = (
-            report["reserved"] / report["window"] if report["window"] else 0.0
-        )
         nearing = fraction >= CONTEXT_WARN_AT
 
-        box.label(text="Context Window")
         head = box.row(align=True)
         head.alert = nearing
-        # No `tokens` word: the heading above says which pair this is, and the word was
-        # what pushed the row past the sidebar's width - MEASURED on screen, 2026-09-26,
-        # where it rendered as "\u22483.6K / 1.0M to\u2026". Blender middle-clips, so a row
-        # that is one word too long loses its last number rather than wrapping.
-        head.label(text=f"\u2248{_count(report['tokens'])} / {_count(report['window_tokens'])}")
-        head.label(text=_percent(fraction))
-        head.operator(
-            "blender_copilot.toggle_context",
-            text="",
-            icon="TRIA_DOWN" if expanded else "TRIA_RIGHT",
-        )
+        head.label(text="Context")
+        # The popover, not an expander: an operator that opens a floating popup. This is
+        # the shape VS Code uses for the same information, and the reason is structural
+        # rather than aesthetic - MEASURED 2026-09-26, inline the expanded block pushed
+        # the record and layout blocks below the fold of a 775 px sidebar, so the
+        # diagnostic was costing the user sight of the controls under it.
+        #
+        # It gets its own row, above the numbers, and that is a measured placement too:
+        # with the button on the same row as the figures, the first screenshot of this
+        # row rendered "\u22483.6K / 1.0M to\u2026" - an icon button costs about four
+        # characters of a sidebar row, and Blender middle-clips rather than wraps.
+        head.operator("blender_copilot.context_popover", text="", icon="INFO")
 
-        # Two bars rather than VS Code's one two-segment bar, because `progress` draws
-        # one factor from the left edge and cannot stack segments. The pair carries the
-        # same information: what is used, and what is held back for the reply. The usage
-        # bar stays when collapsed, because a percentage with no bar is the one thing
-        # the popover exists to show at a glance.
-        used = box.row()
-        used.progress(factor=fraction, type="BAR")
-        if not expanded:
-            if nearing:
-                prose(box, conversation.wrap(CONTEXT_WARN_LINE, budget), icon="ERROR")
-            return
+        figures = box.row(align=True)
+        figures.alert = nearing
+        figures.label(text=f"\u2248{_count(report['tokens'])} / {_count(report['window_tokens'])}")
+        figures.label(text=_percent(fraction))
 
-        legend = box.row(align=True)
-        legend.label(text=f"Request {_size(report['total'])}")
-        legend.label(text=f"\u2248{_count(report['tokens'])} tok")
-        reserved = box.row()
-        reserved.progress(factor=min(1.0, reserve_fraction), type="BAR")
-        # VS Code's own legend text, on a wrapped line rather than in a two-label row.
-        # MEASURED: as a row it rendered "Reserved for resp\u2026" (the pair was ~32
-        # characters and the row gives each label half the width), while a wrapped line
-        # loses nothing.
-        prose(box, box_wrap(
-            f"Reserved for response \u2248{_count(report['reserved_tokens'], decimals=0)} "
-            f"\u00b7 {_share(report['reserved'], report['window'])}",
-            budget,
-        ))
-
-        # The breakdown, as one tight wrapped line per `context.share_line` - see its
-        # docstring for why not one row per category. VS Code's "Uncategorized / Other"
-        # bucket is not needed, because these categories are a partition of a total
-        # computed here and the shares are made to sum to exactly 100%.
-        prose(box, box_wrap(context.share_line(report["sizes"]), budget))
-
-        # What the projection did, in the numbers the trim report already carries.
-        # `sent` against `history` is the honest pair: the model's view and the record.
-        # A wrapped line, not a two-label row: "Model sees 5/5 msgs" beside
-        # "1.8 MB budget" clipped the first label at "Model sees 5/5 \u2026" on screen.
-        source = "Compact" if stream.budget_override() is not None else "budget"
-        prose(box, box_wrap(
-            f"Model sees {report['sent_messages']}/{report['history_messages']} msgs "
-            f"\u00b7 {source} {_size(report['cached_bytes'])}",
-            budget,
-        ))
-        # The actions go here, ABOVE the explanation, and that placement is deliberate:
-        # the explanatory lines are prose and can run past the fold in a short sidebar,
-        # while a button that cannot be reached is a button that does not exist. The
-        # pictures in `logs/context-view-expanded.png` are what settled it - the notes
-        # filled the last visible rows and pushed the button off the bottom edge.
-        actions = box.row(align=True)
-        actions.operator("blender_copilot.compact", text="Compact", icon="FULLSCREEN_EXIT")
-        if stream.budget_override() is not None:
-            actions.operator("blender_copilot.restore_budget", text="Restore", icon="LOOP_BACK")
-
-        dropped = report["report"]["turns_dropped"]
-        if dropped:
-            prose(box, box_wrap(
-                f"{dropped} turn(s) dropped from what the model is sent; "
-                "your transcript keeps every one.", budget))
-
-        measured = report["measured"]
-        if measured:
-            prose(box, box_wrap(measured, budget))
-
+        bar = box.row()
+        bar.progress(factor=fraction, type="BAR")
         if nearing:
             prose(box, box_wrap(CONTEXT_WARN_LINE, budget), icon="ERROR")
-
-        for line in CONTEXT_NOTE_LINES:
-            prose(box, box_wrap(line, budget))
 
     def _draw_coverage(self, layout, budget):
         box = layout.box()
@@ -1436,3 +1396,97 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         if message.expanded:
             for line in conversation.gutter(message.detail):
                 box.label(text=line)
+
+
+# ---------------------------------------------------------------------------
+# The context viewer's popover body
+#
+# Module level, and NOT a method of the panel, for a reason that cost a run: written
+# inside `BLENDER_COPILOT_PT_panel`, a module-level `def` at column zero ends the class
+# body, so every method after it silently became a nested function and the panel lost
+# half its draws (`AttributeError: ... has no attribute '_draw_log'` - which is how this
+# comment came to exist). `tools/panel_draw_smoke.py` binds the panel's `_draw*` methods
+# by name, so it catches exactly this.
+# ---------------------------------------------------------------------------
+
+def draw_context_details(layout, budget):
+    """Everything the context row cannot fit, drawn inside the popup.
+
+    Shaped after VS Code's `chatContextUsageDetails.ts` - the same header pair (used
+    against the window), the same bar with the **reserved output** drawn as a second
+    segment, the same 75%/90% thresholds, and its own "Reserved for response" wording.
+    Where it differs, it says so on screen:
+
+    * The token figures are *converted from bytes* at `context.BYTES_PER_TOKEN`, so
+      they are prefixed `\\u2248`; VS Code's come from its fetch layer as counts. When
+      the provider reports a real count this draws it too, as measured, and reports the
+      measured bytes-per-token beside the estimate. MEASURED 2026-09-26: 1.36 bytes per
+      token on a real request, against an estimate of 3.
+    * The category percentages are shares of **this request**, where VS Code displays
+      shares of the **window**. At this scale a window-relative share rounds every row
+      to 0.0%, so the split would say nothing; the row in the sidebar states the window
+      figure, and this states the split.
+    * The breakdown is one wrapped line (`context.share_line`) rather than VS Code's
+      five labelled rows, and the shares are made to sum to exactly 100 so a reader who
+      adds them up is not left finding a bug.
+
+    `budget` is the caller's measure, and the caller knows its own width: the popup
+    passes `wrap_chars(CONTEXT_POPUP_WIDTH, context)` rather than `wrap_budget(context)`,
+    because the latter answers about the sidebar this popup floats over.
+    """
+    report = context_report()
+    fraction = report["fraction"]
+    reserve_fraction = report["reserved"] / report["window"] if report["window"] else 0.0
+
+    head = layout.row(align=True)
+    head.alert = fraction >= CONTEXT_WARN_AT
+    head.label(text=f"\u2248{_count(report['tokens'])} / {_count(report['window_tokens'])} tokens")
+    head.label(text=_percent(fraction))
+
+    used = layout.row()
+    used.progress(factor=fraction, type="BAR")
+    legend = layout.row(align=True)
+    legend.label(text=f"Request {_size(report['total'])}")
+    legend.label(text=f"\u2248{_count(report['tokens'])} tok")
+
+    reserved = layout.row()
+    reserved.progress(factor=min(1.0, reserve_fraction), type="BAR")
+    # VS Code's own legend, on a wrapped line rather than a two-label row: MEASURED, as
+    # a row the pair rendered "Reserved for resp\u2026" (each label gets half the width).
+    # `conversation.wrap`, not `box_wrap`: the popup has no box around it.
+    prose(layout, conversation.wrap(
+        f"Reserved for response \u2248{_count(report['reserved_tokens'], decimals=0)} "
+        f"\u00b7 {_share(report['reserved'], report['window'])}",
+        budget,
+    ))
+    prose(layout, conversation.wrap(context.share_line(report["sizes"]), budget))
+
+    # What the projection did, in the numbers the trim report already carries. `sent`
+    # against `history` is the honest pair: the model's view and the record.
+    source = "Compact" if stream.budget_override() is not None else "budget"
+    prose(layout, conversation.wrap(
+        f"Model sees {report['sent_messages']}/{report['history_messages']} msgs "
+        f"\u00b7 {source} {_size(report['cached_bytes'])}",
+        budget,
+    ))
+
+    actions = layout.row(align=True)
+    actions.operator("blender_copilot.compact", text="Compact", icon="FULLSCREEN_EXIT")
+    if stream.budget_override() is not None:
+        actions.operator("blender_copilot.restore_budget", text="Restore", icon="LOOP_BACK")
+
+    dropped = report["report"]["turns_dropped"]
+    if dropped:
+        prose(layout, conversation.wrap(
+            f"{dropped} turn(s) dropped from what the model is sent; "
+            "your transcript keeps every one.", budget))
+
+    measured = report["measured"]
+    if measured:
+        prose(layout, conversation.wrap(measured, budget))
+
+    if fraction >= CONTEXT_WARN_AT:
+        prose(layout, conversation.wrap(CONTEXT_WARN_LINE, budget), icon="ERROR")
+
+    for line in CONTEXT_NOTE_LINES:
+        prose(layout, conversation.wrap(line, budget))

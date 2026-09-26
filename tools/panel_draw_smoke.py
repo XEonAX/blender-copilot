@@ -483,73 +483,93 @@ def main() -> None:
         print("ok   and it goes again when nothing is running")
 
         # --- the context viewer ------------------------------------------------
-        # Three claims, none of which a CPython test can reach: that the block is
-        # wired into `draw()`, that collapsed and expanded draw different things,
-        # and that the numbers on screen are the projection's own. The arithmetic
-        # behind them is checked in `tests/test_context.py`; this is the drawing.
+        # Four claims, none of which a CPython test can reach: that the row is wired
+        # into `draw()`, that the row itself is a summary and a way in rather than the
+        # whole breakdown, that the popover panel exists with the region type Blender
+        # requires of a popover, and that the details it draws are the projection's own
+        # numbers. The arithmetic is checked in `tests/test_context.py`; this is the
+        # drawing, and the popover opening is checked in `tools/context_view_probe.py`
+        # because a popover is a GUI widget that no stub layout can produce.
         assert "_draw_context" in panel.BLENDER_COPILOT_PT_panel.draw.__code__.co_names, (
-            "the viewer is not called from draw()"
+            "the row is not called from draw()"
         )
-        assert "show_context" in panel.BlenderCopilotPreferences.bl_rna.properties.keys(), (
-            "the persisted expander flag is missing"
+        popover = getattr(panel, "BLENDER_COPILOT_OT_context_popover", None)
+        assert popover is not None, "the popover operator is not defined"
+        assert popover.bl_idname == "blender_copilot.context_popover", popover.bl_idname
+        assert hasattr(bpy.types, "BLENDER_COPILOT_OT_context_popover"), (
+            "the popover operator is not registered"
         )
+        # The popup, not a Panel: `bl_region_type = "TEMPORARY"` is REJECTED at
+        # registration on 5.2.2 ("Region not found in space type"), which is why this is
+        # an operator. Pinned here so a later "cleanup" back to a Panel popover fails
+        # loudly instead of at a user's first click.
+        assert "invoke_popup" in popover.invoke.__code__.co_names, popover.invoke.__code__.co_names
+        assert popover.__name__.endswith("OT_context_popover"), popover.__name__
+        assert "draw_context_details" in popover.draw.__code__.co_names, (
+            "the popup does not draw the details body"
+        )
+        assert panel.CONTEXT_POPUP_WIDTH > 0, panel.CONTEXT_POPUP_WIDTH
+        # The popup wraps at ITS OWN width, not the sidebar's: an earlier version passed
+        # the region's measure in and wrapped a 520 px popup at a 335 px budget.
+        assert panel.wrap_chars(panel.CONTEXT_POPUP_WIDTH, context) > panel.wrap_budget(
+            context
+        ), (panel.wrap_chars(panel.CONTEXT_POPUP_WIDTH, context), panel.wrap_budget(context))
 
-        # Collapsed: the heading, the header pair and ONE bar - and none of the
-        # breakdown, because the whole point of collapsing is that a panel which
-        # cannot scroll itself does not spend its height on a diagnostic.
-        settings.show_context = False
+        # The row: one bar, the pair of numbers, and an INFO button that opens the
+        # popover. Nothing else - the breakdown moved out, so a row that grew back into
+        # it would be a regression this catches.
         log = []
-        instance._draw_context(StubLayout(log), panel.wrap_budget(context), settings)
+        instance._draw_context(StubLayout(log), panel.wrap_budget(context))
         drawn = [entry[1] for entry in log if entry[0] == "label"]
         bars = [entry for entry in log if entry[0] == "progress"]
-        assert "Context Window" in drawn, log
+        assert "Context" in drawn, log
         assert sum("\u2248" in text and " / " in text for text in drawn) == 1, drawn
         assert bars and all(entry[1] == "BAR" for entry in bars), bars
         assert len(bars) == 1, bars
         assert not [text for text in drawn if text in context_module.USAGE_CATEGORIES], drawn
-        assert ("operator", "blender_copilot.toggle_context", "") in log, log
+        assert not [text for text in drawn if text.startswith("Reserved")], drawn
+        assert (
+            "operator",
+            "blender_copilot.context_popover",
+            "",
+        ) in log, log
         print(
-            f"ok   collapsed: the window, one usage bar, and no breakdown "
+            f"ok   the row: the window, one usage bar, and no breakdown "
             f"({len(log)} widgets)"
         )
 
-        # Expanded: the split line, the reserved segment as its own bar, and the action
-        # that compacts. What is drawn must be what the projection reports, and the
-        # comparison is made against `context.share_line` itself rather than against a
-        # retyped expectation - the point of this check is that the panel draws the
-        # arithmetic's answer, not that the arithmetic is right (that is the CPython
-        # suite's job, and it checks the shares sum to 100).
-        settings.show_context = True
+        # The popover's body: everything the row cannot fit. What is drawn must be what
+        # the projection reports, and the comparison is made against
+        # `context.share_line` itself rather than against a retyped expectation - the
+        # point is that the panel draws the arithmetic's answer, not that the arithmetic
+        # is right (the CPython suite checks the shares sum to 100).
         log = []
-        instance._draw_context(StubLayout(log), panel.wrap_budget(context), settings)
+        panel.draw_context_details(StubLayout(log), panel.wrap_budget(context))
         drawn = [entry[1] for entry in log if entry[0] == "label"]
         bars = [entry for entry in log if entry[0] == "progress"]
         assert len(bars) == 2, bars
         report = panel.context_report()
         split = context_module.share_line(report["sizes"])
-        # Every word of the split line is on screen: it is drawn as a wrapped
-        # paragraph, so the labels arrive as several labels rather than one string.
         joined = " ".join(drawn).replace("\u00b7", " ")
         for token in split.replace("\u00b7", " ").split():
             assert token in joined, (token, drawn)
-        assert "Reserved for response" in " ".join(drawn), drawn
-        assert "Reserved for response" in " ".join(drawn), drawn
+        assert "Reserved for response" in joined, drawn
         assert ("operator", "blender_copilot.compact", "Compact") in log, log
         assert ("operator", "blender_copilot.restore_budget", "Restore") not in log, log
-        # The round trip, proven: the figure drawn is the figure `context.usage`
-        # produces from the same projection the request will use.
         assert any(
             text == f"Request {panel._size(report['total'])}" for text in drawn
         ), drawn
         print(
-            f"ok   expanded: the split line at the projection's own shares, the "
+            f"ok   the popover body: the split at the projection's own shares, the "
             f"reserve as a second bar, Compact offered"
         )
 
         # The warning state, forced: the numbers cannot reach 75% of a 1M-token
         # window in a test, so the report is stubbed and the *reaction* to it is
-        # what gets checked. Both halves - the sentence at the threshold, silence
-        # below it - because a warning that always draws is not a warning.
+        # what gets checked, in BOTH surfaces - the row (which is all a user sees with
+        # the popover shut) and the popover body. Both halves of each: the sentence at
+        # the threshold and silence below it, because a warning that always draws is
+        # not a warning.
         real_report = panel.context_report
         try:
             for fraction, expected in ((0.60, False), (0.75, True), (0.94, True)):
@@ -558,26 +578,28 @@ def main() -> None:
                     "fraction": f,
                     "total": int(f * real_report()["window"]),
                 }
-                log = []
-                instance._draw_context(StubLayout(log), panel.wrap_budget(context), settings)
-                # The first few words, not `CONTEXT_WARN_LINE[:30]`: the sentence is
-                # wrapped before it is drawn, so no single label carries 30 characters
-                # of it - an assertion against the unwrapped prefix failed on a panel
-                # that had drawn the warning correctly.
-                joined = " ".join(
-                    entry[1] for entry in log if entry[0] == "label"
-                )
-                warned = "Quality may decline" in joined
-                assert warned is expected, (fraction, warned, log)
-                alerted = any(entry == ("alert", "", "") for entry in log)
-                assert alerted is expected, (fraction, alerted, log)
+                for surface, draw in (
+                    ("row", lambda l: instance._draw_context(l, panel.wrap_budget(context))),
+                    ("popover", lambda l: panel.draw_context_details(
+                        l, panel.wrap_budget(context))),
+                ):
+                    log = []
+                    draw(StubLayout(log))
+                    # The first few words, not `CONTEXT_WARN_LINE[:30]`: the sentence is
+                    # wrapped before it is drawn, so no single label carries 30
+                    # characters of it - an assertion against the unwrapped prefix failed
+                    # once on a panel that had drawn the warning correctly.
+                    joined = " ".join(entry[1] for entry in log if entry[0] == "label")
+                    warned = "Quality may decline" in joined
+                    assert warned is expected, (surface, fraction, warned, log)
+                    alerted = any(entry == ("alert", "", "") for entry in log)
+                    assert alerted is expected, (surface, fraction, alerted, log)
             print(
-                "ok   the warning draws at 75% and above and stays away below it, "
-                "with the header row alerted"
+                "ok   the warning draws at 75% and above and stays away below it, in "
+                "the row and in the popover, with the header row alerted"
             )
         finally:
             panel.context_report = real_report
-        settings.show_context = False
 
         # Compact's mechanism, without the button: a session-scoped budget the
         # projection reads, restorable, and never written to the preferences.

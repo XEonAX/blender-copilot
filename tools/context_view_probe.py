@@ -1,37 +1,48 @@
 #!/usr/bin/env python3
-"""Photograph the context viewer, collapsed and expanded, and measure the difference.
+"""Photograph the context ROW, and confirm the popup opens - nothing more.
 
     python3 tools/bounded_run.py 150 -- \\
         /Applications/Blender.app/Contents/MacOS/Blender \\
         --python tools/context_view_probe.py
 
-No provider, no credential, no money: this is a GUI probe. `SMOKE OK` in
-`tools/panel_draw_smoke.py` already proves the block *draws*; what it cannot prove is
-that a human sees anything, because a stub layout counts widgets and not pixels.
+No provider, no credential, no money: this is a GUI probe.
 
-What this measures, in pixels, from the sidebar region's own screenshot:
+What it verifies, and what it deliberately does NOT:
 
-  * the number of text rows the panel draws with the viewer collapsed, and with it
-    expanded, and that the second is larger - the causal claim that the toggle does
-    what it says. The states differ by exactly one flag, so a picture of some *other*
-    panel (Item, Tool, ...) would show a delta of zero and fail loudly. That is the
-    discriminating check `tools/spacing_probe.py` had to learn the hard way, when it
-    photographed Blender's Transform panel and its log claimed otherwise.
-  * how many rows of the block are actually on screen at the default sidebar height,
-    which is a fact about this panel's placement that no stub can see: the block sits
-    below an unbounded transcript, and an unbounded transcript can push it off the
-    fold. The number is reported rather than asserted, because "it fits" depends on
-    how tall the user's sidebar is.
+  * the **row** is drawn on screen: a real sidebar screenshot, scanned for text bands,
+    which is the one part of this feature a machine can see.
+  * the **popup opens**: `bpy.ops.blender_copilot.context_popover("INVOKE_DEFAULT")` - the
+    call the INFO button makes - reports `RUNNING_MODAL`, i.e. a modal popup is running.
 
-It writes `logs/context-view.txt` and the two PNGs, prints `CONTEXT OK` /
-`CONTEXT FAILED`, and quits Blender itself, so the bounded driver's deadline stays a
-backstop. `AGENTS.md`: Blender exits 0 even when a `--python` script raises, so
-**grep for the token**, never the status.
+**The popup's appearance is not machine-verifiable on 5.2.2, and that is measured, not
+assumed.** Three attempts, all of which failed for different reasons:
+
+  1. `bpy.ops.screen.screenshot_area` photographs ONE area, and a popup is not in any area.
+  2. `bpy.ops.screen.screenshot` renders the screen's *areas* and leaves popup overlays
+     out. Measured with a trivial throwaway popup: it changed **0 pixels** of the window
+     screenshot, while a human watching the same run saw the popup.
+  3. An OS `screencapture` shows whatever the display happens to be showing - in this
+     run, the desktop wallpaper, because Blender's window was not what was on screen at
+     that instant. It is also a picture of the user's whole desktop, which does not
+     belong in a repository.
+
+So the popup's body is checked headlessly (`tools/panel_draw_smoke.py` drives
+`draw_context_details` against a stub layout and checks the numbers against the
+projection), its arithmetic is checked in `tests/test_context.py`, and its *appearance*
+is the human's judgement - which is the same division of labour `AGENTS.md` describes
+for anything a stub cannot see.
+
+The popup is invoked LAST, because it is modal and `quit_blender` does not run while it
+is open: the probe therefore terminates its own process after printing the verdict, so a
+popup can never outlive the run and leave itself on the user's screen. The bounded
+driver's deadline remains a backstop.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -51,13 +62,8 @@ import spacing_probe as sp  # noqa: E402
 
 EXT = "bl_ext.user_default.blender_copilot"
 LOG = ROOT / "logs" / "context-view.txt"
-SHOT_COLLAPSED = ROOT / "logs" / "context-view-collapsed.png"
-SHOT_EXPANDED = ROOT / "logs" / "context-view-expanded.png"
-# The panel's text column, as an inset from the sidebar's own edges in the screenshot.
-# `screenshot_area` writes the whole *area*, not the region (measured: the picture is
-# 1580 px wide while the region is 335), so the column has to be located from the
-# region's geometry rather than guessed - a first version scanned x 45..230, which is
-# the viewport's own labels, and found four rows of text in a panel full of them.
+SHOT_ROW = ROOT / "logs" / "context-view-row.png"
+# The panel's text column, as an inset from the sidebar's own edges in a screenshot.
 TEXT_PAD = 20
 
 NOTES: list[str] = []
@@ -131,12 +137,6 @@ def main() -> int:
     stream = bc.stream
     settings = addon.preferences
 
-    # The viewer is collapsed by default and expanded for the second photograph; the
-    # preference is restored at the end so the probe does not change what the user
-    # sees next time they open the sidebar.
-    original_expanded = bool(settings.show_context)
-    settings.show_context = False
-
     seed(conversation)
     state = {"step": 0, "attempts": 0, "bands": {}}
 
@@ -190,35 +190,41 @@ def main() -> int:
             state["step"] = 3
             return 0.4
         if step == 3:
-            note("collapsed: " + sp.screenshot(SHOT_COLLAPSED))
-            _redraw()
+            note("row: " + sp.screenshot(SHOT_ROW))
             state["step"] = 4
             return 0.4
         if step == 4:
-            rows, widest = read_bands(SHOT_COLLAPSED)
-            state["bands"]["collapsed"] = rows
-            note(f"collapsed: {len(rows)} text rows, widest {widest} bright px")
-            settings.show_context = True
-            _redraw()
+            rows, widest = read_bands(SHOT_ROW)
+            state["bands"]["row"] = rows
+            note(f"the context row on screen: {len(rows)} text rows, "
+                 f"widest {widest} bright px")
+            # And that the popup opens at all. Its APPEARANCE is not checkable from here -
+            # see the docstring - so what is checked is the mechanism: the operator reaches
+            # `invoke_popup` and Blender reports a modal popup running.
+            try:
+                result = bpy.ops.blender_copilot.context_popover("INVOKE_DEFAULT")
+            except Exception as exc:  # noqa: BLE001 - a refusal is the finding
+                result = f"{type(exc).__name__}: {exc}"
+            state["invoke"] = str(result)
+            note(f"context_popover(INVOKE_DEFAULT) -> {result}")
+            check(
+                "the INFO button's operator opens a modal popup",
+                "RUNNING_MODAL" in str(result),
+                result,
+            )
             state["step"] = 5
             return 0.4
         if step == 5:
-            note("expanded: " + sp.screenshot(SHOT_EXPANDED))
-            _redraw()
-            state["step"] = 6
-            return 0.4
-        if step == 6:
-            rows, widest = read_bands(SHOT_EXPANDED)
-            state["bands"]["expanded"] = rows
-            note(f"expanded: {len(rows)} text rows, widest {widest} bright px")
             return verdict()
         return None
 
     def read_bands(path: Path):
         """Text rows inside the sidebar's column of the area screenshot.
 
-        The x range comes from the region, not from a constant: the screenshot is of
-        the whole 3D Viewport and the sidebar is its rightmost `region.width` pixels.
+        The x range comes from the region, not from a constant: the picture is of the
+        whole 3D Viewport and the sidebar is its rightmost `region.width` pixels.
+        MEASURED the hard way - the first version scanned x 45..230, which is the
+        viewport's own labels, and found four rows of text in a panel full of them.
         """
         parts = sp.sidebar()
         region = parts[1] if parts else None
@@ -254,35 +260,46 @@ def main() -> int:
             pass
 
     def verdict():
-        collapsed = state["bands"].get("collapsed", [])
-        expanded = state["bands"].get("expanded", [])
-        delta = len(expanded) - len(collapsed)
-        note(f"rows drawn: collapsed {len(collapsed)}, expanded {len(expanded)}, "
-             f"delta {delta}")
-        check("the sidebar was photographed with the Copilot tab selected",
-              len(collapsed) >= 3, collapsed)
-        check("the collapsed viewer draws its heading, its header pair and a bar",
-              len(collapsed) >= 3, len(collapsed))
-        # The causal claim. A picture of a different panel cannot move by flipping a
-        # flag only this panel reads, so a delta of zero is a failed photograph and
-        # not a small delta.
-        check("expanding the viewer draws more rows than collapsing it", delta > 0, delta)
-        check("and the extra rows are the block's own, not one stray pixel row",
-              6 <= delta <= 40, delta)
-        settings.show_context = original_expanded
-        _redraw()
+        rows = state["bands"].get("row", [])
+        note(f"invoke: {state.get('invoke')}")
+        check(
+            "the sidebar was photographed with the Copilot tab selected",
+            len(rows) >= 3,
+            rows,
+        )
+        check(
+            "the context row drew its own text, not an empty box",
+            len(rows) >= 3,
+            len(rows),
+        )
         try:
             LOG.write_text("\n".join(NOTES) + "\n", encoding="utf-8")
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             note(f"could not write {LOG}: {exc}")
-        note(f"pictures: {SHOT_COLLAPSED.name} (collapsed), {SHOT_EXPANDED.name} (expanded)")
+        note(f"picture: {SHOT_ROW.name} - the sidebar as Blender drew it")
+        # The honest limit of this instrument, stated where a reader will find it rather
+        # than only in the docstring.
+        note(
+            "NOT verified here, and not verifiable by any script in 5.2.2: what the POPUP "
+            "looks like. MEASURED 2026-09-26 - a trivial operator popup changed 0 pixels "
+            "of `bpy.ops.screen.screenshot` (its API renders the screen's areas and leaves "
+            "popup overlays out), and an OS `screencapture` shows whatever the display is "
+            "showing, which was the desktop rather than the Blender window. The popup's "
+            "body is checked by `tools/panel_draw_smoke.py`, its numbers are checked in "
+            "`tests/test_context.py`, and its appearance is for a human to judge."
+        )
         for failure in FAILURES:
             note(f"FAILED: {failure}")
         print("CONTEXT OK" if not FAILURES else "CONTEXT FAILED", flush=True)
-        try:
-            bpy.ops.wm.quit_blender()
-        except Exception:
-            sys.exit(1 if FAILURES else 0)
+        # The popup is invoked last and is MODAL, so `quit_blender` cannot run while it is
+        # open - the first version of this probe sat there until the bounded driver killed
+        # it, leaving a popup on the user's screen for the rest of the deadline. Terminating
+        # the process is the honest way out: the verdict is already printed and flushed,
+        # the log is written, and the popup cannot outlive the run. The bound stays as the
+        # backstop it was always meant to be rather than as the mechanism.
+        note("terminating the process: the popup is modal, so nothing else can close it")
+        sys.stdout.flush()
+        os.kill(os.getpid(), signal.SIGTERM)
         return None
 
     bpy.app.timers.register(poll, first_interval=0.5)

@@ -25,7 +25,6 @@ _classes = (
     panel.BLENDER_COPILOT_OT_stop,
     panel.BLENDER_COPILOT_OT_clear,
     panel.BLENDER_COPILOT_OT_toggle_detail,
-    panel.BLENDER_COPILOT_OT_toggle_context,
     panel.BLENDER_COPILOT_OT_compact,
     panel.BLENDER_COPILOT_OT_restore_budget,
     panel.BLENDER_COPILOT_OT_show_code,
@@ -35,6 +34,7 @@ _classes = (
     panel.BLENDER_COPILOT_OT_reveal_history,
     panel.BLENDER_COPILOT_OT_delete_history,
     panel.BLENDER_COPILOT_PT_panel,
+    panel.BLENDER_COPILOT_OT_context_popover,
 )
 
 
