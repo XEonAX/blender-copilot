@@ -25,7 +25,17 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, prompt, scope, stream, toolbox, transport, undo, undo_blender
+from . import (
+    context,
+    conversation,
+    prompt,
+    scope,
+    stream,
+    toolbox,
+    transport,
+    undo,
+    undo_blender,
+)
 
 CATEGORY = "Copilot"
 NON_HOST_AREAS = {"TEXT_EDITOR", "PREFERENCES", "STATUSBAR", "TOPBAR"}
@@ -142,6 +152,25 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
             ("external", "External transcript", "Controls only; transcript in a Text datablock"),
         ),
         default="boxes",
+    )
+
+    # Ticket 14 §1's lever, and the only setting that reads the budget. 0 ships,
+    # because the derivation is now the better answer: it is sized from the
+    # provider's own window rather than from the 32k floor the design assumed. The
+    # range is a way to spend *less* memory - a user pointing this add-on at a
+    # smaller model - which is why it stops at 512 KiB rather than at the derived
+    # default, and what it buys is earlier, visible trimming instead of a rejected
+    # request.
+    context_history_kib: bpy.props.IntProperty(
+        name="History budget (KiB)",
+        description=(
+            "Bytes of past conversation the model may be sent, in KiB. "
+            "0 derives it from the model's context window (recommended); "
+            "8-512 sets it lower"
+        ),
+        default=0,
+        min=0,
+        max=context.MAX_BUDGET_KIB,
     )
 
 
@@ -392,6 +421,13 @@ class BLENDER_COPILOT_OT_enable_global_undo(bpy.types.Operator):
 PX_PER_CHAR = 7.0
 UI_INSET_PX = 30.0
 MIN_WRAP_CHARS = 12
+# The trim note's own text is wider than its character count says - `\u2702` and
+# `\u2014` are wide glyphs - and it is drawn inside a box, so it wraps a few
+# characters earlier than the prose around it. Measured by look, not by formula:
+# at the default sidebar width the first line was clipped by about eight
+# characters with the shared budget (`logs/context-trim.png`), and this is the
+# margin that fixed it.
+NOTE_WRAP_INSET = 8
 
 
 def wrap_budget(context) -> int:
@@ -472,6 +508,19 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         # shortens a long basename rather than letting the row do it.
         scope_row = layout.row(align=True)
         scope_row.label(text=scope.header(), icon="FILE_BLEND")
+        if conversation.session.trimmed:
+            # The trim chip shares the second row rather than the first: three
+            # labels on the status row middle-clip "prototype" to "prototy...",
+            # which is what happened the first time this was drawn (measured on
+            # screen, in `tools/trim_panel_probe.py`) and is exactly the kind of
+            # clipping the stub layout cannot see.
+            #
+            # It is **derived**, never a stored flag (ticket 14 §5): recomputed
+            # from the store and the budget on every draw, so a chip that says the
+            # model is missing part of the record can neither be stale nor be
+            # missed when it is true - which is why it is in the header and not
+            # behind the transcript.
+            scope_row.label(text="\u2702 trimmed")
 
         pause = undo_blender.pause_reason(context)
         if pause:
@@ -689,6 +738,8 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             self._draw_code(box, message, index)
         elif message.kind == conversation.KIND_TOOL:
             self._draw_tool(box, message, index)
+        elif message.kind == conversation.KIND_NOTE:
+            self._draw_note(box, message, index, budget)
         elif message.kind == conversation.KIND_ERROR:
             box.alert = True
             # WRAP, never one label. Blender middle-clips a label that does not
@@ -737,6 +788,38 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             self._draw_detail(box, message, index)
         elif status == conversation.STATUS_RUNNING:
             row.label(text="running\u2026")
+
+    def _draw_note(self, box, message, index, budget):
+        """The trim notice (build ticket 06).
+
+        One sentence, wrapped like every other piece of prose - Blender
+        middle-clips a label that does not fit, and a note about what the model
+        could not see is the worst possible line to mangle. Behind it, an expander
+        that says which turns went, because "the model saw less than you did" is
+        only trustworthy when the panel can name the part that went.
+        """
+        for position, chunk in enumerate(
+            conversation.wrap(
+                message.text, max(MIN_WRAP_CHARS, budget - NOTE_WRAP_INSET)
+            )
+        ):
+            box.label(text=chunk, icon="INFO" if position == 0 else "NONE")
+        if not message.detail:
+            return
+        row = box.row(align=True)
+        icon = "TRIA_DOWN" if message.expanded else "TRIA_RIGHT"
+        toggle = row.operator(
+            "blender_copilot.toggle_detail",
+            text=message.purpose or "details",
+            icon=icon,
+        )
+        toggle.index = index
+        if message.expanded:
+            for line in message.detail.splitlines():
+                for chunk in conversation.wrap(
+                    line, max(MIN_WRAP_CHARS, budget - NOTE_WRAP_INSET)
+                ):
+                    box.label(text=chunk)
 
     def _draw_detail(self, box, message, index):
         row = box.row(align=True)

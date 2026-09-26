@@ -134,7 +134,7 @@ def switch(blend_path: str) -> bool:
     persist()
 
     current, history = store_.open(blend_path)
-    conversation.session.restore(history)
+    conversation.session.restore(history, current.meta)
     _written = conversation.session.snapshot()
     return True
 
@@ -145,6 +145,11 @@ def persist(force: bool = False) -> bool:
     history = conversation.session.snapshot()
     if not force and history == _written:
         return False
+    # Ticket 14 §5's informational block, beside `retention`: it records that the
+    # model was shown less than the file holds, and is never read back as the
+    # source of truth for the projection - that is always recomputed.
+    if conversation.session.trim_meta:
+        current.meta["context_trim"] = conversation.session.trim_meta
     if not current.save(history):
         return False
     _written = history

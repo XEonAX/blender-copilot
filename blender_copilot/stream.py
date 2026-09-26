@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import conversation, prompt, scope, toolbox, transport, undo_blender
+from . import conversation, context, prompt, scope, toolbox, transport, undo_blender
 
 # 50 ms. Ticket 11 measured launch-to-ready at 0.021 s and a JSON round trip at
 # 0.02 ms, so this is two orders of magnitude above the IPC it is watching -
@@ -66,6 +66,30 @@ def _send_round(messages: list[dict]) -> str | None:
     if config.problem:
         return config.problem
     return transport.worker.send(config, messages, toolbox.SCHEMAS)
+
+
+def history_budget_bytes() -> int:
+    """The projection's budget: the addon's preference, or the derived default.
+
+    Ticket 14 §1's `context_history_kib` (8-512 KiB) when the user set one - a
+    lever for a smaller model than the shipped backend - and otherwise the budget
+    derived from the provider's own documented window (`context.derive_budget_bytes`),
+    which is the floor the design was written against finally replaced by the real
+    figure. 0 means "derive", and is what ships.
+
+    Read on every request rather than cached, so lowering the preference shows up
+    on the next round. A missing or unreadable preference is not an error: it
+    means the derived default, because a turn must not fail over a budget.
+    """
+    kib = 0
+    try:
+        addon = bpy.context.preferences.addons.get(__package__)
+        kib = int(getattr(addon.preferences, "context_history_kib", 0) or 0)
+    except Exception:  # noqa: BLE001 - no preferences, no window, or a stub context
+        kib = 0
+    if kib > 0:
+        return context.budget_from_kib(kib)
+    return context.DEFAULT_HISTORY_BUDGET_BYTES
 
 
 def tag_view3d_redraw() -> int:
@@ -163,4 +187,5 @@ conversation.session.attach(
     execute=toolbox.execute,
     context=prompt.context,
     undo=undo_blender,
+    budget=history_budget_bytes,
 )

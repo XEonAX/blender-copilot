@@ -35,8 +35,32 @@ summary comes from - are injected through `attach()`, because two of them need
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+from pathlib import Path
+
+
+def _sibling(name: str):
+    """Import a bpy-free sibling module, from a package or from this file's folder.
+
+    The same problem `execution._sibling` solves: the CPython suite and the probes
+    load these modules by path, with no package around them, so a plain
+    `from . import context` is not always available.
+    """
+    try:
+        return importlib.import_module(f".{name}", __package__)
+    except Exception:  # noqa: BLE001 - any failure here means "load it by path"
+        path = Path(__file__).with_name(f"{name}.py")
+        spec = importlib.util.spec_from_file_location(f"bc_{name}", path)
+        if spec is None or spec.loader is None:  # pragma: no cover - defensive
+            raise ImportError(f"cannot load {name} from {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+context = _sibling("context")
 
 # Rough character budget for one panel label. 5.2.2 gives a panel no wrapping
 # control, no monospace font and no rich text, so long lines are wrapped by
@@ -55,6 +79,11 @@ KIND_ASSISTANT = "assistant"
 KIND_CODE = "code"
 KIND_TOOL = "tool"
 KIND_ERROR = "error"
+# The trim notice (build ticket 06): an additive amendment to ticket 08's set,
+# the same way ticket 10's `guide` kind amended ticket 06's enum. It is not wire
+# format - nothing of it is stored - so it is reconstructed nowhere and only ever
+# describes what *this* session's projection did.
+KIND_NOTE = "note"
 
 STATUS_RUNNING = "running"
 STATUS_OK = "ok"
@@ -390,6 +419,19 @@ class Conversation:
         # A *turn* failure (401, 429, a dropped stream) is a transcript block
         # instead, because sending again is a real option there.
         self.transport_error: str | None = None
+        # Where the in-flight turn's messages start in the wire history, or None
+        # when no turn is in flight. The projection protects everything from here
+        # on from editing (ticket 14's invariant I4).
+        self.turn_start: int | None = None
+        # How to read the history budget, injected through `attach` because it
+        # needs the addon's preferences and this module may not import `bpy`.
+        self.budget_source = None
+        # Ticket 14 §5's `meta.context_trim`, folded a turn at a time and written
+        # with the conversation. Informational: the chip is derived, never read
+        # from here.
+        self.trim_meta: dict = {}
+        self._trim_note_sent = False
+        self._trimmed_cache = None
 
     # -- rendering: shared block model ---------------------------------------
     def _line_count(self, message: Message) -> int:
@@ -414,6 +456,11 @@ class Conversation:
             return lines
         if message.kind == KIND_ERROR:
             lines = [f"| ! {message.text}"]
+            if message.expanded and message.detail:
+                lines += gutter(message.detail)
+            return lines
+        if message.kind == KIND_NOTE:
+            lines = [f"| {message.text}"]
             if message.expanded and message.detail:
                 lines += gutter(message.detail)
             return lines
@@ -446,6 +493,10 @@ class Conversation:
                     chunks.append(message.detail)
             elif message.kind == KIND_ERROR:
                 chunks.append(f"[error] {message.text}")
+                if message.detail:
+                    chunks.append(message.detail)
+            elif message.kind == KIND_NOTE:
+                chunks.append(f"[note] {message.text}")
                 if message.detail:
                     chunks.append(message.detail)
             else:
@@ -522,6 +573,10 @@ class Conversation:
             return
         self.messages.append(Message("user", prompt))
         self.messages.append(Message("assistant", ""))
+        # Where this turn starts in the wire history: everything from here on is
+        # what the projection may not touch (I4). Set before the append, so it is
+        # the index of the user's own message.
+        self.turn_start = len(self.history)
         self.history.append({"role": "user", "content": prompt})
         self.streaming = True
         # A new turn supersedes the last receipt. The receipt says "Ctrl+Z reverts
@@ -638,7 +693,7 @@ class Conversation:
         return True
 
     def wire_messages(self, user_text: str, base_prompt: str, summary: str) -> list[dict]:
-        """The first request of a turn: base prompt, history, the prompt, the summary.
+        """The first request of a turn: base prompt, projection, prompt, summary.
 
         The live summary is the **trailing** message rather than part of index 0
         (ticket 14's correction to ticket 09 §4, confirmed accepted by the provider
@@ -651,26 +706,101 @@ class Conversation:
         be in both places). Rounds after the first are built by `pump` through
         `build_messages`, where the history already ends with the tool results.
 
-        Ticket 14's degradation projection is deliberately **not** here: nothing is
-        trimmed or summarized, because the projection belongs with the store it is
-        a projection *of*.
+        Ticket 14's degradation projection is inside `build_messages`, which both
+        paths go through - so a turn is projected however it is started, and the
+        store it projects is untouched either way.
         """
         return self.build_messages(base_prompt, summary, user_text)
 
     def build_messages(
         self, base_prompt: str, summary: str, user_text: str | None = None
     ) -> list[dict]:
-        """The provider's message list: `[system, *history, (user), system]`.
+        """The provider's message list: `[system, (*projection), (user), system]`.
 
-        The history dicts are copied shallowly, so a caller cannot reach back into
-        the stored conversation by holding on to the list it was handed.
+        The store is the user's record and this is the *view* of it the model gets
+        (ticket 14): the base prompt stays byte-identical at index 0, the live
+        summary stays last, and the middle is whatever `context.plan` decided the
+        request can afford. `plan` copies, so holding this list cannot reach back
+        into the conversation.
         """
+        projected, report = context.plan(
+            self.history, self.budget_bytes(), self.turn_start
+        )
+        self._note_trim(report)
         messages: list[dict] = [{"role": "system", "content": base_prompt}]
-        messages.extend(dict(message) for message in self.history)
+        messages.extend(projected)
         if user_text and user_text.strip():
             messages.append({"role": "user", "content": user_text.strip()})
         messages.append({"role": "system", "content": summary})
         return messages
+
+    # -- the projection (build ticket 06) ------------------------------------
+    def budget_bytes(self) -> int:
+        """Bytes of prunable history this session may send (ticket 14 §1).
+
+        The addon's `context_history_kib` when the user set one, and the budget
+        derived from the provider's own window otherwise. Asked through a callable
+        on every request rather than cached in a variable, so lowering the
+        preference takes effect on the next round instead of at the next restart -
+        and so this module still imports no `bpy`.
+        """
+        if self.budget_source is None:
+            return context.DEFAULT_HISTORY_BUDGET_BYTES
+        try:
+            value = int(self.budget_source() or 0)
+        except Exception:  # noqa: BLE001 - a broken preference must not stop a turn
+            return context.DEFAULT_HISTORY_BUDGET_BYTES
+        return value or context.DEFAULT_HISTORY_BUDGET_BYTES
+
+    @property
+    def trimmed(self) -> bool:
+        """Whether the model is being shown less than this record holds.
+
+        Derived, never stored (ticket 14 §5): the header chip reads this instead of
+        a flag written when trimming happened, so it cannot drift from the
+        projection it claims to describe. Memoised on the two things that can
+        change the answer - the store's length and the budget - because the panel
+        asks on every repaint and measuring a 200-message history is not free.
+        """
+        if not self.history:
+            return False
+        key = (len(self.history), self.budget_bytes(), self.turn_start)
+        if self._trimmed_cache is None or self._trimmed_cache[0] != key:
+            self._trimmed_cache = (
+                key,
+                bool(context.plan(self.history, key[1], self.turn_start)[1]["trimmed"]),
+            )
+        return self._trimmed_cache[1]
+
+    def _note_trim(self, report: dict) -> None:
+        """Ticket 14 §5: one note per turn, at the moment the view first differs.
+
+        Never per round: a turn that trims on its fourth round has already said so
+        on its first, and a note per round would bury the transcript in them.
+
+        Appended, so it lands at the head of the turn being built: the request it
+        describes has no transcript rows yet, and the user's message and the reply
+        are appended straight after it. Inserting it after the previous turn's own
+        prompt instead would put it inside a turn it does not describe.
+        """
+        if not report["trimmed"]:
+            return
+        self.trim_meta = context.trim_meta(self.trim_meta, report)
+        if self._trim_note_sent:
+            return
+        self._trim_note_sent = True
+        self.messages.append(
+            Message(
+                "assistant",
+                kind=KIND_NOTE,
+                text=context.note_line(report),
+                detail=context.note_detail(report),
+                # What the expander is offering. A trim that only elided tool output
+                # has no turn to name, and a button that promised "which turns" would
+                # be the same small lie as a note that claimed a stub it never sent.
+                purpose="which turns" if report["turns_dropped"] else "details",
+            )
+        )
 
     def apply_event(self, event: dict) -> bool:
         """One worker event in, visible state out. True when a repaint is owed.
@@ -755,7 +885,7 @@ class Conversation:
             message.expanded = not message.expanded
 
     # -- the loop (ticket 09 §0) ---------------------------------------------
-    def attach(self, send, execute, context, undo=None) -> None:
+    def attach(self, send, execute, context, undo=None, budget=None) -> None:
         """Wire the loop's three collaborators, and the undo side if there is one.
 
         Nothing here may import `bpy` - the CPython checks are the only way to
@@ -782,11 +912,21 @@ class Conversation:
           * `undo.close_turn` runs inside a `finally` in `_end_turn`, which is
             ticket 12 §1's wording and not decoration: a path that dies halfway
             through ending a turn still leaves the user a Ctrl+Z.
+          * `budget() -> int` - the bytes of prunable history this session may
+            send, read fresh for every request so the addon's preference is a
+            lever rather than a setting that needs a restart. It is a callable and
+            not a module import for the usual reason: the answer comes from
+            `bpy.context.preferences`.
+
+        (`context` here is the loop's prompt-and-summary hook, and it shadows the
+        sibling module of the same name inside this function only. The body below
+        is careful never to need both.)
         """
         self.send = send
         self.execute = execute
         self.context = context
         self.undo = undo
+        self.budget_source = budget
 
     def pump(self) -> bool:
         """Exactly one bounded step of the turn's state machine, or nothing.
@@ -983,6 +1123,15 @@ class Conversation:
             self.busy_kind = None
             self.pending = []
             self._round_open = False
+            # No turn in flight, so there is nothing to protect: the next request
+            # protects the newest turn instead, which is the same answer
+            # `store.prune` gives about what may be dropped.
+            self.turn_start = None
+            # The next turn may say that it trimmed again. Reset here rather than
+            # in `begin_turn`, because the first request of a turn is built
+            # *before* the turn opens - a reset there would wipe the latch the
+            # first request had just set, and the turn would note twice.
+            self._trim_note_sent = False
         finally:
             # The `finally` is the decision's wording and its point: `close_turn`
             # is what puts one `undo_push` behind the turn, at its end, so an
@@ -1000,6 +1149,10 @@ class Conversation:
         self.last_receipt = None
         self.reasoning_chars = 0
         self._reasoning_notch = 0
+        # A cleared conversation is a new one: the trim record belongs to the
+        # record that went, and `scope.clear` files the new one under fresh meta.
+        self.trim_meta = {}
+        self._trimmed_cache = None
 
     # -- leaving and re-entering a conversation ------------------------------
     def abandon(self) -> bool:
@@ -1028,7 +1181,7 @@ class Conversation:
         """The wire history, copied, for the store to write."""
         return [dict(message) for message in self.history]
 
-    def restore(self, history: list[dict]) -> None:
+    def restore(self, history: list[dict], meta: dict | None = None) -> None:
         """Adopt a stored conversation: the wire history and the rows it implies.
 
         Both transcripts are replaced together, because a display transcript that
@@ -1036,6 +1189,10 @@ class Conversation:
         prevent. `abandon`'s discipline applies too - the generation moves - so an
         event from whatever was running before this conversation was opened cannot
         land in it.
+
+        `meta` is the record's own, so the trim counters this session adds to are
+        the ones the file already carries rather than a fresh count that would
+        reset on every restart.
         """
         self._end_turn()
         self.history[:] = [dict(message) for message in history]
@@ -1044,6 +1201,8 @@ class Conversation:
         self.reasoning_chars = 0
         self._reasoning_notch = 0
         self._rows = {}
+        self.trim_meta = dict((meta or {}).get("context_trim") or {})
+        self._trimmed_cache = None
         self.generation += 1
 
 
@@ -1136,6 +1295,26 @@ def _demo() -> list[Message]:
             status=STATUS_ERROR,
             purpose="Link red material",
             detail=DEMO_TRACEBACK,
+        ),
+        # The trim notice (build ticket 06). In the fixture rather than in a probe
+        # only, so every layout's draw body renders it expanded and collapsed on
+        # every run - ticket 14 §4 asks for exactly that, and a kind the panel can
+        # be handed but never drawn would ship as an empty box.
+        Message(
+            "assistant",
+            kind=KIND_NOTE,
+            purpose="which turns",
+            text=(
+                "\u2702 context trimmed \u2014 model saw 3 tool results elided, "
+                "2 turns dropped; your history is kept"
+            ),
+            detail=(
+                "61342 B of settled history, 48000 B budget\n"
+                + context.EVICTION_ORDER
+                + "\nturn 1: \u201cwhat is selected?\u201d \u2014 5 messages\n"
+                "turn 2: \u201cmake it taller\u201d \u2014 9 messages\n"
+                "get_scene_info output elided: 7862 B \u2192 236 B"
+            ),
         ),
         Message(
             "assistant",

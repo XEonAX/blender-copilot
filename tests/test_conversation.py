@@ -41,6 +41,13 @@ assert _undo_spec and _undo_spec.loader
 undo = importlib.util.module_from_spec(_undo_spec)
 _undo_spec.loader.exec_module(undo)
 
+_context_spec = importlib.util.spec_from_file_location(
+    "context", _HERE.parent / "blender_copilot" / "context.py"
+)
+assert _context_spec and _context_spec.loader
+context = importlib.util.module_from_spec(_context_spec)
+_context_spec.loader.exec_module(context)
+
 
 def check(label: str, condition: bool) -> None:
     assert condition, f"FAILED: {label}"
@@ -210,6 +217,7 @@ check(
         conversation.KIND_CODE,
         conversation.KIND_TOOL,
         conversation.KIND_ERROR,
+        conversation.KIND_NOTE,
     },
 )
 check("the demo carries a running tool", rich.running_tool is not None)
@@ -1295,5 +1303,257 @@ check(
     undo.PAUSE_ACTION[undo.PAUSE_EDIT_MODE] == "",
 )
 
+
+# ==========================================================================
+# The projection: what the model sees, and what the record keeps
+# (build ticket 06 - *How a conversation degrades as context grows*)
+# ==========================================================================
+print("\n-- the projection --")
+
+
+def long_history(turns, size=4_000):
+    """A stored conversation large enough to need trimming, in wire format."""
+    history = []
+    for index in range(turns):
+        call_id = f"g{index}"
+        history.append({"role": "user", "content": f"turn {index} asks for something"})
+        history.append(
+            {
+                "role": "assistant",
+                "content": f"working on {index}",
+                "tool_calls": [wire_call(call_id, f"purpose {index}", "pass")],
+            }
+        )
+        history.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": json.dumps({"ok": True, "stdout": "y" * size}),
+            }
+        )
+        history.append({"role": "assistant", "content": f"turn {index} is done"})
+    return history
+
+
+def stored_bytes(messages):
+    return sum(context.message_bytes(message) for message in messages)
+
+
+def last_turn_start(history):
+    return max(
+        index for index, message in enumerate(history) if message.get("role") == "user"
+    )
+
+
+def notes_in(session):
+    return [message for message in session.messages if message.kind == conversation.KIND_NOTE]
+
+
+long = conversation.Conversation()
+long_sender = FakeSender()
+long.attach(
+    send=long_sender,
+    execute=ok_executor,
+    context=lambda: ("BASE", "LIVE SUMMARY"),
+    # The addon's lever, set here the way `attach` injects it in a real session -
+    # a budget small enough that a six-turn conversation has to give something up.
+    budget=lambda: 900,
+)
+seed = long_history(6)
+long.history[:] = [dict(message) for message in seed]
+long.messages[:] = conversation.messages_from_history(long.history)
+check("a stored conversation is not touched until a request is built", long.history == seed)
+check("the chip is derived, so it is already on for a record this size", long.trimmed is True)
+
+request = long.build_messages("BASE", "LIVE SUMMARY", "make it taller")
+projection = request[1:-2]
+check(
+    "the base prompt is still index 0",
+    request[0] == {"role": "system", "content": "BASE"},
+)
+check(
+    "the live summary is still the last message",
+    request[-1] == {"role": "system", "content": "LIVE SUMMARY"},
+)
+check(
+    "the head marker goes straight after the base prompt",
+    request[1]["role"] == "system"
+    and "elided to fit the context window" in request[1]["content"],
+)
+check(
+    "the projection is a sound subsequence of the store",
+    context.validate_projection(long.history, projection, protected_from=None) == [],
+)
+check(
+    "the oldest turns are the ones that went, and the newest settled one stayed",
+    not any(
+        message.get("content") == "turn 0 asks for something" for message in projection
+    )
+    and any(
+        message.get("content") == "turn 4 asks for something" for message in projection
+    ),
+)
+check(
+    "the request is smaller than the record it was made from",
+    stored_bytes(request) < stored_bytes(long.history),
+)
+check(
+    "and the record itself is untouched by building it", long.history == seed
+)
+
+# A budget where elision *alone* is enough: then every turn stays and only the
+# tool output goes, which is the "cheapest thing to lose" half of the order.
+elide_only = conversation.Conversation()
+elide_only.attach(
+    send=FakeSender(),
+    execute=ok_executor,
+    context=lambda: ("BASE", "LIVE SUMMARY"),
+    budget=lambda: 3_000,
+)
+elide_only.history[:] = [dict(message) for message in seed]
+elide_only.messages[:] = conversation.messages_from_history(elide_only.history)
+elide_only_request = elide_only.build_messages("BASE", "LIVE SUMMARY", "make it taller")
+elide_only_projection = elide_only_request[1:-2]
+check(
+    "with room for the turns, only the tool output goes",
+    any(
+        message.get("role") == "tool" and '"elided": true' in (message.get("content") or "")
+        for message in elide_only_projection
+    )
+    and all(
+        f"turn {index} asks for something" in json.dumps(elide_only_projection)
+        for index in range(6)
+    ),
+)
+check(
+    "and the elided stub still answers its call, so nothing dangles",
+    context.validate_projection(elide_only.history, elide_only_projection) == [],
+)
+check(
+    "the elision is announced rather than silent, and names no dropped turn",
+    "tool result" in notes_in(elide_only)[0].text
+    and "turn" not in notes_in(elide_only)[0].text,
+)
+check(
+    "and its expander offers details rather than turns nobody dropped",
+    notes_in(elide_only)[0].purpose == "details",
+)
+
+notes = notes_in(long)
+check("a turn that had to trim leaves exactly one note", len(notes) == 1)
+check(
+    "the note says what the model did not see, in one sentence",
+    notes[0].text.startswith("\u2702 context trimmed")
+    and "model saw" in notes[0].text
+    and notes[0].text.endswith("your history is kept"),
+)
+check(
+    "expanding it names the turns that went",
+    "turn 1:" in notes[0].detail
+    and "messages" in notes[0].detail
+    and "\u201c" in notes[0].detail,
+)
+check("and says why the order is the order", context.EVICTION_ORDER in notes[0].detail)
+check(
+    "its expander promises the turns that went, because turns went",
+    notes[0].purpose == "which turns",
+)
+check(
+    "it is the last row when the request is built, so it heads the turn being built",
+    long.messages[-1].kind == conversation.KIND_NOTE,
+)
+check(
+    "the trim is recorded for the file, beside the retention cap",
+    long.trim_meta["last_trim"]["turns"] >= 1
+    and long.trim_meta["turns_elided_total"] >= 1
+    and bool(long.trim_meta["first_trim_at"]),
+)
+check(
+    "and the note claims only loss that reached the wire: a stub step 2 then "
+    "dropped is reported as dropped",
+    "elided" not in notes[0].text and "dropped" in notes[0].text,
+)
+
+long.begin_turn("make it taller")
+check("the turn in flight starts where the history ends", long.turn_start == len(seed))
+deliver(long, "Looking first.", [wire_call("n1", "Inspect the scene", "pass")])
+check(
+    "a later round that trims again does not add a second note",
+    len(notes_in(long)) == 1,
+)
+check("a tick runs the queued call", long.pump() is True)
+check("the row carries its result", long._rows["n1"].status == conversation.STATUS_OK)
+check("the next tick asks for the round after it", long.pump() is True)
+check("exactly one request went out", len(long_sender.sent) == 1)
+
+second = long_sender.sent[0]
+tail = long.history[long.turn_start :]
+check(
+    "the round after a tool result is projected too",
+    second[1]["role"] == "system" and "elided to fit the context window" in second[1]["content"],
+)
+check(
+    "with the base prompt at index 0 and the summary last",
+    second[0] == {"role": "system", "content": "BASE"}
+    and second[-1] == {"role": "system", "content": "LIVE SUMMARY"},
+)
+check(
+    "and the turn in flight is byte-identical inside it (I4)",
+    second[:-1][-len(tail) :] == tail,
+)
+check(
+    "that projection is sound too",
+    context.validate_projection(long.history, second[1:-1], protected_from=long.turn_start)
+    == [],
+)
+
+deliver(long, "Done: the cube is taller on Z.")
+check("the long turn still gets answered", not long.streaming and long.messages[-1].text.startswith("Done"))
+check("and its history is still sendable", unanswered(long.history) == [])
+check(
+    "the record keeps everything the model no longer saw",
+    long.history[: len(seed)] == seed,
+)
+check(
+    "so the request the model got stayed smaller than the record",
+    stored_bytes(second) < stored_bytes(long.history),
+)
+check(
+    "and the record grew by exactly the live turn, with nothing trimmed out of it",
+    len(long.history) == len(seed) + 4
+    and long.history[len(seed)] == {"role": "user", "content": "make it taller"},
+)
+# One note per *turn*, not per round and not per session. The first request of a
+# turn is built before the turn opens, so a latch reset in `begin_turn` wipes the
+# note the first request just wrote and the turn notes twice - which is exactly
+# what the GUI probe caught and this file did not, until this check was added.
+check(
+    "the whole turn carries exactly one note, however many rounds trimmed",
+    len(notes_in(long)) == 1,
+)
+long.begin_turn("now make it red")
+long.build_messages("BASE", "LIVE SUMMARY")
+check(
+    "and the next turn that trims says so again, once",
+    len(notes_in(long)) == 2,
+)
+long.cancel()
+
+short_session = conversation.Conversation()
+wire(short_session, FakeSender())
+short_session.begin_turn("hello")
+plain_request = short_session.build_messages("BASE", "LIVE SUMMARY")
+check(
+    "a conversation inside its budget is sent byte-identical to the store",
+    plain_request
+    == [{"role": "system", "content": "BASE"}]
+    + short_session.history
+    + [{"role": "system", "content": "LIVE SUMMARY"}],
+)
+check("with no chip and no note", not short_session.trimmed and notes_in(short_session) == [])
+short_session.cancel()
+
+long.clear()
+check("the chip goes when the record does", long.trimmed is False)
 
 print("\nall checks passed")

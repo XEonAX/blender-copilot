@@ -23,7 +23,15 @@ sys.path.insert(0, str(ROOT))
 
 import bpy  # noqa: E402
 import blender_copilot as bc  # noqa: E402
-from blender_copilot import conversation, execution, panel, scope, toolbox, undo  # noqa: E402
+from blender_copilot import (  # noqa: E402
+    context as context_module,
+    conversation,
+    execution,
+    panel,
+    scope,
+    toolbox,
+    undo,
+)
 
 
 class StubLayout:
@@ -439,6 +447,77 @@ def main() -> None:
         instance._draw_actions(StubLayout(log), context, panel.wrap_budget(context))
         assert not send_is_disabled(log), log
         print("ok   with neither pause there is no banner and Send is live")
+
+        # --- the trim notice and the chip (build ticket 06) -------------------
+        # The demo transcript carries a note, so every variant above drew it in both
+        # states. What is checked here is what is about *state* rather than layout:
+        # the chip is on only while the projection really trims, the note's expander
+        # exists, and the budget is a preference that can be pulled down.
+        notes = [
+            message
+            for message in conversation.session.messages
+            if message.kind == conversation.KIND_NOTE
+        ]
+        assert len(notes) == 1, notes
+        note_index = conversation.session.messages.index(notes[0])
+        notes[0].expanded = False
+        log = []
+        instance._draw_part(StubLayout(log), notes[0], note_index, panel.wrap_budget(context))
+        collapsed = [entry[1] for entry in log if entry[0] == "label"]
+        assert any("context trimmed" in line for line in collapsed), log
+        assert (
+            "operator",
+            "blender_copilot.toggle_detail",
+            "which turns",
+        ) in log, log
+        assert longest_label(log) <= LABEL_SOFT_LIMIT, longest_label(log)
+        notes[0].expanded = True
+        log = []
+        instance._draw_part(StubLayout(log), notes[0], note_index, panel.wrap_budget(context))
+        joined = " ".join(entry[1] for entry in log if entry[0] == "label")
+        assert "budget" in joined and "turn 1:" in joined, joined
+        assert longest_label(log) <= LABEL_SOFT_LIMIT, longest_label(log)
+        print("ok   the trim note draws expanded and collapsed, and wraps in both")
+
+        # The chip is derived from the record and the budget, so it appears and
+        # disappears with them rather than with a flag written when trimming
+        # happened - which is the whole reason it cannot be stale.
+        saved_history = list(conversation.session.history)
+        saved_budget = conversation.session.budget_source
+        conversation.session.history[:] = [
+            {"role": "user", "content": "make it taller"},
+            {
+                "role": "assistant",
+                "content": "done, and here is a long enough explanation to matter" * 2,
+            },
+            {"role": "user", "content": "now make it red"},
+            {"role": "assistant", "content": "done"},
+        ]
+        conversation.session.budget_source = lambda: 10
+        log = []
+        instance._draw_header(StubLayout(log), context)
+        drawn = [entry[1] for entry in log if entry[0] == "label"]
+        assert "\u2702 trimmed" in drawn, log
+        print(f"ok   the header chip says the model is not seeing all of it: {drawn!r}")
+        conversation.session.budget_source = None
+        log = []
+        instance._draw_header(StubLayout(log), context)
+        drawn = [entry[1] for entry in log if entry[0] == "label"]
+        assert "\u2702 trimmed" not in drawn, log
+        print("ok   and the chip goes again when the same record fits the budget")
+        conversation.session.history[:] = saved_history
+        conversation.session.budget_source = saved_budget
+
+        prop = panel.BlenderCopilotPreferences.bl_rna.properties["context_history_kib"]
+        assert prop.default == 0, prop.default
+        assert getattr(prop, "hard_max", None) == context_module.MAX_BUDGET_KIB, (
+            getattr(prop, "hard_max", None),
+            getattr(prop, "max", None),
+        )
+        print(
+            "ok   the history budget is a preference that ships derived and can "
+            f"only be pulled down (0-{prop.hard_max} KiB)"
+        )
 
         print("\nall draw bodies ran")
     finally:
