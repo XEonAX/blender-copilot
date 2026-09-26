@@ -242,28 +242,32 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
         box = layout.box()
         box.label(text="API key", icon="LOCKED")
         box.prop(self, "api_key", text="")
-        for line in conversation.wrap(
-            "Stored unencrypted in Blender's userpref.blend - masked on screen, "
-            "plaintext on disk. Leave it empty and export DEEPSEEK_API_KEY "
-            "instead if that trade is not acceptable; then the key is never "
-            "written by Blender at all.",
-            budget,
-        ):
-            box.label(text=line)
+        prose(
+            box,
+            conversation.wrap(
+                "Stored unencrypted in Blender's userpref.blend - masked on screen, "
+                "plaintext on disk. Leave it empty and export DEEPSEEK_API_KEY "
+                "instead if that trade is not acceptable; then the key is never "
+                "written by Blender at all.",
+                budget,
+            ),
+        )
 
         row = layout.row()
         row.prop(self, "base_url", text="Base URL")
         row = layout.row()
         row.prop(self, "model", text="Model")
-        for line in conversation.wrap(
-            "Both are non-secret and may be left empty: the URL falls back to "
-            "DEEPSEEK_API_URL and then to the provider's documented default, and "
-            "the model to DEEPSEEK_MODEL and then to deepseek-flash. Model names "
-            "churn, and a retired name is accepted while silently serving "
-            "something else - prefer a name copied from the provider's live docs.",
-            budget,
-        ):
-            layout.label(text=line)
+        prose(
+            layout,
+            conversation.wrap(
+                "Both are non-secret and may be left empty: the URL falls back to "
+                "DEEPSEEK_API_URL and then to the provider's documented default, and "
+                "the model to DEEPSEEK_MODEL and then to deepseek-flash. Model names "
+                "churn, and a retired name is accepted while silently serving "
+                "something else - prefer a name copied from the provider's live docs.",
+                budget,
+            ),
+        )
 
         # Which route Send will actually use. This is 05 §2's "never show the key,
         # show a fingerprint" - the last four characters, enough to tell two keys
@@ -272,8 +276,7 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
         # otherwise invisible.
         live = layout.box()
         live.label(text="Send will use", icon="INFO")
-        for line in conversation.wrap(transport.config(self).describe(), budget):
-            live.label(text=line)
+        prose(live, conversation.wrap(transport.config(self).describe(), budget))
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +571,48 @@ def wrap_budget(context) -> int:
     return max(MIN_WRAP_CHARS, int((width - UI_INSET_PX) / (PX_PER_CHAR * scale)))
 
 
+# ---------------------------------------------------------------------------
+# Paragraph spacing
+#
+# A panel has one UI *row* per label, so a paragraph drawn as one label per wrapped
+# line is as tall as its line count times a row rather than times a line - the
+# complaint that produced this, and the fix, are both measured rather than argued.
+#
+# `tools/spacing_probe.py` renders the same four lines four ways and reads the pitch
+# back out of the screenshot's pixels: **31 px** for one label per line (what this
+# panel did), **21 px** with `scale_y = 0.75`, and **19 px** with `align=True` as
+# well - which is what ships, 39% shorter. `align=True` is the half that removes the
+# inter-item space (Blender's own layout code: `flow->space_ = flow->align() ? 0 :
+# columnspace`) and `scale_y` shortens each row; the glyphs are 9 px tall and the
+# same probe's picture shows them intact at 0.75.
+#
+# The one mechanism that would be better is not available: `label_multiline` draws
+# the whole paragraph in a single widget at the font's own ~13 px line pitch, and the
+# **installed 5.2.2 exposes no such function** - it is 5.3.0-alpha, checked in that
+# build's RNA, which is why this panel wraps by hand at all.
+#
+# Two things this must *not* be used for: a single line (there is no paragraph to
+# tighten, and the extra column would be noise), and text whose width is what is
+# being tested (`tools/panel_draw_smoke.py` checks the drawn labels against a
+# measured clipping limit - the wrapped prose still goes through `label`, so that
+# check keeps working).
+PROSE_SCALE_Y = 0.75
+
+
+def prose(layout, lines, icon="NONE"):
+    """Draw already-wrapped `lines` as one tight paragraph.
+
+    `icon` lands on the first line only, which is the idiom every caller here
+    already used (`ERROR` on an error's opening line). Returns the column, so a
+    caller can add to it.
+    """
+    column = layout.column(align=True)
+    column.scale_y = PROSE_SCALE_Y
+    for index, line in enumerate(lines):
+        column.label(text=line, icon=icon if index == 0 else "NONE")
+    return column
+
+
 class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -710,8 +755,11 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             banner = layout.box()
             banner.alert = True
             for position, line in enumerate(undo.PAUSE_LINES[pause]):
-                for chunk in conversation.wrap(line, budget):
-                    banner.label(text=chunk, icon="ERROR" if position == 0 else "NONE")
+                prose(
+                    banner,
+                    conversation.wrap(line, budget),
+                    icon="ERROR" if position == 0 else "NONE",
+                )
             action = undo.PAUSE_ACTION[pause]
             if action:
                 banner.operator(
@@ -732,8 +780,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         box = layout.box()
         box.alert = True
         box.label(text="Send is unavailable", icon="ERROR")
-        for line in conversation.wrap(problem, budget):
-            box.label(text=line)
+        prose(box, conversation.wrap(problem, budget))
         box.operator(
             "blender_copilot.retry_transport", text="Retry", icon="FILE_REFRESH"
         )
@@ -761,13 +808,11 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             icon="CHECKMARK" if receipt["undoable"] else "ERROR",
         )
         for line in receipt["changed"]:
-            for chunk in conversation.wrap(line, budget):
-                box.label(text=chunk)
+            prose(box, conversation.wrap(line, budget))
         if receipt["more"]:
             box.label(text=f"and {receipt['more']} more")
         for line in receipt["lines"]:
-            for chunk in conversation.wrap(line, budget):
-                box.label(text=chunk)
+            prose(box, conversation.wrap(line, budget))
 
     def _draw_input(self, layout, context, settings):
         """The prompt editor.
@@ -838,16 +883,17 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             head.enabled = False
             head.label(text="running code", icon="TIME")
             for line in budget.RUNNING_LINES:
-                for chunk in conversation.wrap(line, wrap_chars):
-                    note.label(text=chunk)
+                prose(note, conversation.wrap(line, wrap_chars))
 
     def _draw_coverage(self, layout, budget):
         box = layout.box()
         # These are the honesty contract's sentences. They must be readable at any
-        # sidebar width, so they wrap like everything else instead of clipping.
+        # sidebar width, so they wrap like everything else instead of clipping - and
+        # they are drawn tightly, because at three sentences of two lines each the
+        # old row-per-line spacing made this block the tallest thing under the
+        # transcript.
         for line in conversation.COVERAGE_LINES:
-            for chunk in conversation.wrap(line, budget):
-                box.label(text=chunk)
+            prose(box, conversation.wrap(line, budget))
 
     def _draw_history(self, layout, budget):
         """Where the conversation is filed, and the two actions that touch the
@@ -865,8 +911,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         heading.label(text=scope.header(), icon="FILE_BLEND")
         note = scope.note()
         if note:
-            for line in conversation.wrap(note, budget):
-                box.label(text=line)
+            prose(box, conversation.wrap(note, budget))
         row = box.row(align=True)
         row.operator("blender_copilot.reveal_history", text="Show folder", icon="FILE_FOLDER")
         row.operator("blender_copilot.delete_history", text="Delete all", icon="TRASH")
@@ -881,8 +926,9 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         box = layout.box()
         lines = conversation.session.visible_lines(newest_first=newest_first)
         if lines:
-            for line in lines:
-                box.label(text=line)
+            # One tight paragraph: this variant is a wall of lines, which is where the
+            # row-per-line spacing cost the most.
+            prose(box, lines)
         else:
             box.label(text="No conversation yet.")
 
@@ -927,8 +973,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         """
         if turn[0].kind == conversation.KIND_USER:
             layout.label(text="You", icon="USER")
-            for chunk in conversation.wrap(turn[0].text, budget):
-                layout.label(text=chunk)
+            prose(layout, conversation.wrap(turn[0].text, budget))
             layout.separator(factor=0.4)
             parts = turn[1:]
         else:
@@ -943,8 +988,7 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
     def _draw_part(self, layout, message, index, budget):
         if message.kind == conversation.KIND_ASSISTANT:
             if message.text:
-                for chunk in conversation.wrap(message.text, budget):
-                    layout.label(text=chunk)
+                prose(layout, conversation.wrap(message.text, budget))
             return
 
         box = layout.box()
@@ -968,12 +1012,13 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
             # constant. The second and later lines have no icon and would fit at
             # the shared budget, but they are wrapped to the same measure on
             # purpose, because two indents in one paragraph reads as a mistake.
-            for position, chunk in enumerate(
+            prose(
+                box,
                 conversation.wrap(
                     message.text, max(MIN_WRAP_CHARS, budget - ERROR_ICON_INSET)
-                )
-            ):
-                box.label(text=chunk, icon="ERROR" if position == 0 else "NONE")
+                ),
+                icon="ERROR",
+            )
             if message.detail:
                 self._draw_detail(box, message, index)
 
@@ -1020,12 +1065,11 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         that says which turns went, because "the model saw less than you did" is
         only trustworthy when the panel can name the part that went.
         """
-        for position, chunk in enumerate(
-            conversation.wrap(
-                message.text, max(MIN_WRAP_CHARS, budget - NOTE_WRAP_INSET)
-            )
-        ):
-            box.label(text=chunk, icon="INFO" if position == 0 else "NONE")
+        prose(
+            box,
+            conversation.wrap(message.text, max(MIN_WRAP_CHARS, budget - NOTE_WRAP_INSET)),
+            icon="INFO",
+        )
         if not message.detail:
             return
         row = box.row(align=True)
@@ -1038,10 +1082,12 @@ class BLENDER_COPILOT_PT_panel(bpy.types.Panel):
         toggle.index = index
         if message.expanded:
             for line in message.detail.splitlines():
-                for chunk in conversation.wrap(
-                    line, max(MIN_WRAP_CHARS, budget - NOTE_WRAP_INSET)
-                ):
-                    box.label(text=chunk)
+                prose(
+                    box,
+                    conversation.wrap(
+                        line, max(MIN_WRAP_CHARS, budget - NOTE_WRAP_INSET)
+                    ),
+                )
 
     def _draw_detail(self, box, message, index):
         row = box.row(align=True)

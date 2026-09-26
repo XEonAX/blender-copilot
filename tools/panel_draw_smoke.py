@@ -42,6 +42,7 @@ class StubLayout:
         self.alert = False
         self._enabled = True
         self.alignment = ""
+        self._scale_y = 1.0
 
     @property
     def enabled(self):
@@ -55,6 +56,18 @@ class StubLayout:
         if not value:
             self._log.append(("disabled", "", ""))
 
+    @property
+    def scale_y(self):
+        return self._scale_y
+
+    @scale_y.setter
+    def scale_y(self, value):
+        # Recorded for the same reason: "paragraphs are drawn 25% shorter" is a
+        # claim about a property of a layout, and a stub that silently accepted it
+        # would let the tightening be deleted without a test noticing.
+        self._scale_y = float(value)
+        self._log.append(("scale_y", f"{self._scale_y:.2f}", ""))
+
     def _child(self):
         return StubLayout(self._log)
 
@@ -67,6 +80,7 @@ class StubLayout:
         return self._child()
 
     def column(self, align=False):
+        self._log.append(("column", "align" if align else "", ""))
         return self._child()
 
     def split(self, factor=0.5, align=False):
@@ -313,6 +327,24 @@ def main() -> None:
         print(
             "ok   newest-first puts the live turn first, and chronological order is "
             "still available"
+        )
+
+        # Paragraph spacing. The measured mechanism is a two-part claim - the lines of
+        # one paragraph sit in an `align=True` column, and that column is drawn at
+        # `scale_y = PROSE_SCALE_Y` - and this is where both halves are pinned. What
+        # it cannot show is the pitch: 31 px down to 19 px is a fact about pixels, and
+        # `tools/spacing_probe.py` is the instrument that reads it.
+        log = []
+        layout = StubLayout(log)
+        instance._draw_boxes(layout, context, panel.wrap_budget(context), True)
+        columns = [entry for entry in log if entry[0] == "column"]
+        scales = {entry[1] for entry in log if entry[0] == "scale_y"}
+        assert columns, log
+        assert any(entry[1] == "align" for entry in columns), columns
+        assert scales == {f"{panel.PROSE_SCALE_Y:.2f}"}, scales
+        print(
+            f"ok   paragraphs are drawn in an aligned column at scale_y "
+            f"{panel.PROSE_SCALE_Y} ({len(columns)} columns, {len(scales)} scale)"
         )
 
         # The working indicator: nothing is drawn when idle, and the arc appears

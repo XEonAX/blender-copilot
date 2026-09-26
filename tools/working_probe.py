@@ -289,7 +289,17 @@ def main() -> int:
     worker = StallingWorker(
         [
             tool_round("call_1", "Set a marker property", "print('scripted')"),
-            prose_round("First turn: the scripted call ran and this is the reply."),
+            # A reply long enough to wrap into a paragraph, because the paragraph is
+            # the thing the picture is for: a one-line reply cannot show whether the
+            # lines of a block sit at 19 px or 31 px, and the difference is the whole
+            # subject of `tools/spacing_probe.py`.
+            prose_round(
+                "Two calls, material first. The mesh had no material slots yet, so the "
+                "link call failed, and the traceback came back on the next round "
+                "exactly as the loop promises. The detail behind the expander names "
+                "the line that raised, and the change made before it is still on the "
+                "scene rather than unwound."
+            ),
             prose_round("Second turn: this one arrives after a silence."),
         ],
         stall=0.0,
