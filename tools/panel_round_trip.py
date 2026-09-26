@@ -6,16 +6,17 @@
         /Applications/Blender.app/Contents/MacOS/Blender \\
         --python tools/panel_round_trip.py
 
-**Why this one is allowed to use a screen** (AGENTS.md, broadened 2026-09-25 for
-cases that genuinely need one): `bpy.app.timers` pump only from the GUI event
-loop, so the drain between the worker subprocess and the panel cannot be
-exercised under `blender -b` *at all*. Everything else here has a headless
-counterpart in `tools/transport_smoke.py`; this run exists solely to prove that
-the timer fires, drains the pipe, and repaints a real region.
+**Why this one needs a screen** (screens allowed, AGENTS.md 2026-09-26; this case
+would have qualified under the older narrower rule too): `bpy.app.timers` pump
+only from the GUI event loop, so the drain between the worker subprocess and the
+panel cannot be exercised under `blender -b` *at all*. Everything else here has a
+headless counterpart in `tools/transport_smoke.py`; this run exists solely to
+prove that the timer fires, drains the pipe, and repaints a real region.
 
-It does **not** take a screenshot - seeing is the human's job, and the visual
-judgement is theirs. What it does instead is count the repaints, which is a
-mechanism claim, not an aesthetic one.
+It does **not** take a screenshot, because counting repaints is a mechanism claim
+and pixels are not needed to make it - not because looking is off limits. It
+could: a screenshot is evidence like any other now, to be cited along with what
+it does not show.
 
 It writes its verdict to `logs/panel-round-trip.txt`, prints a token, and quits
 Blender itself, so the deadline is a backstop and not the mechanism. It runs

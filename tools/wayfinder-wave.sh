@@ -63,7 +63,9 @@ Do this now, in order:
    set \`Status: resolved\`. Keep the answer decision-dense, not an essay.
 4. Touch nothing else: no edits to map.md, no edits to other ticket files, no
    git commands, no writes under /Users/user/Projects/blender.
-5. Do not delegate to subagents.
+5. Delegation is allowed (AGENTS.md, 2026-09-26): hand an independent probe to a
+   subagent if that helps. You still own this ticket - its status line and its
+   answer stay yours.
 
 If your ticket's Type is \`grilling\`: no human is present, so you must still
 decide - but record the decision as PROVISIONAL, with the evidence, the

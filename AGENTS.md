@@ -43,7 +43,11 @@ The work is charted as a wayfinder map:
    `Status: human-required`, add a `DO NOT CLAIM` banner above the heading, and
    say in the body exactly what a human would have to do. Do not guess on the
    human's behalf and do not file it as `resolved`.
-7. Do not delegate to subagents. Do the work yourself.
+7. **Delegation is allowed.** Subagents are a normal tool here: hand an
+   independent probe to one, or have one implement while another reviews. Two
+   rules keep it useful rather than chaotic — whoever writes the ticket file
+   claims it first, and a ticket has exactly one owner. Two executors editing the
+   same ticket file or the same module is the failure mode, not delegation.
 
 ## Provisional decisions
 
@@ -74,8 +78,14 @@ assumptions wearing a human's signature is worse than an unresolved ticket.
   Any `--python` checker must therefore print a verdict token (`SMOKE OK` on
   success, `SMOKE FAILED` from a `try/except BaseException`) and the caller must
   **grep for the token**. Gate on the token, never on the status.
-- **Never launch a GUI application and never take screenshots.** Hand visual
-  judgement to the human and say so.
+- **Screens are allowed, screenshots included.** A run may launch Blender with a
+  window and read a screenshot back — that is how several layout bugs on this
+  effort were found, and none of them was visible to a headless check. What stays
+  mandatory is the binding, not the ban: launch non-headless runs in the
+  **background**, wrap them in `tools/bounded_run.py`, write results to a file,
+  and have the script **quit Blender itself**. A screenshot is evidence like any
+  other — cite it, and say what it does *not* show. (Project owner, 2026-09-26;
+  this supersedes the headless-only rail below.)
 - **Bound every probe you run.** A case whose subject *is* an infinite loop must
   never be run unguarded. One instance on this effort wedged itself four times
   this way — once for 15 minutes at 100% CPU — on the very ticket whose job is to
@@ -92,18 +102,16 @@ assumptions wearing a human's signature is worse than an unresolved ticket.
   `blender -b` does not return, so the tool call that launched it never returns
   either and your session dies with it. That is not a metaphor; it is what
   happened four times.
-- **Non-headless runs are permitted for the narrow class of work that genuinely
-  needs a screen** — the project owner broadened this from a single ticket on
-  2026-09-25. "Needs a screen" means the case cannot be measured headlessly at
-  all: undo requires one, and `bpy.app.timers` and modal operators pump only from
-  the GUI event loop. It does **not** mean "the GUI would be convenient", and it
-  does not license browsing the interface. If you use it: launch in the
-  **background**, never the foreground; wrap it in `tools/bounded_run.py`; write
-  results to a file rather than trusting the terminal; and have the script
-  **quit Blender itself**, so the deadline is a backstop and not the mechanism.
-  **Still never take a screenshot.** Seeing is the entire reason the GUI rule
-  exists, and it stays the human's job: a run may *use* a screen, never *read*
-  one.
+- **A screen is available whenever the check needs one.** The earlier rule
+  confined non-headless runs to cases that *cannot* be measured headlessly (undo,
+  `bpy.app.timers`, modal operators) and forbade screenshots; the project owner
+  dropped both on **2026-09-26**. So run with a window when that is the honest way
+  to check, and look at what it drew. The mechanics are unchanged and not
+  optional, because they are about hangs rather than about screens: launch in the
+  **background**, never the foreground; wrap the command in
+  `tools/bounded_run.py`; write results to a file rather than trusting the
+  terminal; and have the script **quit Blender itself**, so the deadline is a
+  backstop and not the mechanism.
 
 ## House facts — established, do not re-derive
 

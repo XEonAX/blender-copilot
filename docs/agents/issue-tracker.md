@@ -42,8 +42,8 @@ Used by `/wayfinder`. The **map** is a file with one **child** file per ticket.
     is never reopened; if the answer turns out wrong, file a new ticket that
     says so and names the one it supersedes.
   - `human-required` — resolvable only by a person, not by an agent, because
-    the work needs something a session does not have: a GUI, a screenshot, a
-    credential, or a judgement call that has not been delegated. **Never**
+    the work needs something a session does not have: a credential, a physical
+    device, or a judgement call that has not been delegated. **Never**
     claimable, by protocol rather than by convention, so a frontier scan
     cannot pick it up by mistake.
 - **Blocking**: a `Blocked by: NN, NN` line near the top. A ticket is unblocked

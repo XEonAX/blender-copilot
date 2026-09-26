@@ -7,8 +7,10 @@ Why this file exists: the recovery design assumed a Python-driven edit could be
 walked back with Ctrl+Z. Reading the source says otherwise --
 `WM_operator_call_py()` bumps `wm->op_undo_depth`, so operators called from
 Python never push an undo step. This probe settles the question by measurement.
-It CANNOT run headlessly: undo needs a screen, so there is nothing to see under
-`blender -b`, and no agent can run it on your behalf.
+It cannot run headlessly: undo needs a screen, so there is nothing to see under
+`blender -b`. A session may run it in a GUI session now (screens allowed, project
+owner 2026-09-26): set `BC_QUIT=1` so the script quits Blender itself, and bound
+the invocation with `tools/bounded_run.py`.
 
 How to run:
 

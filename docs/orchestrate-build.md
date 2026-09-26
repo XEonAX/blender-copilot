@@ -1,8 +1,10 @@
 # Orchestrating the build tickets, one at a time
 
-Copy the prompt below into VS Code chat. It makes the chat agent the
-**orchestrator** — it selects, launches, verifies and commits — while each ticket
-is *implemented* by a separate executor.
+Invocable as `/orchestrate-build` in VS Code chat — the skill at
+`.github/skills/orchestrate-build/SKILL.md` dispatches to the prompt below — or
+paste the prompt yourself. It makes the chat agent the **orchestrator**: it
+selects, launches, verifies and commits, while each ticket is *implemented* by a
+separate executor, a subagent by default.
 
 It replaces waves with a queue. The decision map was drained in parallel because
 its tickets are files that answer questions; build tickets edit the same handful
@@ -20,9 +22,10 @@ Set it once, at the top of the run, then keep it. Both modes are wired up:
 | Cost | your model, your context | pi's model, separate |
 | Skills | you must point it at `~/.agents/skills/*` | loaded via `--skill` |
 
-Prefer **B** for tickets that spend money or touch the network path, because pi
-gets a genuinely fresh process and the launcher can pre-flight the frontier.
-Prefer **A** when you want to read the reasoning in the same window.
+**Mode A is the default**, and it is what the prompt below asks for: the whole run
+stays in one window and you can read the executor's reasoning as it lands. Reach
+for **B** on tickets that spend money or touch the network path — pi gets a
+genuinely fresh process, and the launcher pre-flights the frontier itself.
 
 ## Why it is shaped this way
 
@@ -39,14 +42,11 @@ Prefer **A** when you want to read the reasoning in the same window.
 - **No map.** The build tracker has no `map.md` and should not grow one — the
   ticket statuses and the commit log are already the record. Inventing a
   progress board is work that verifies nothing.
-- **The headless rail is lifted for this run.** Build tickets include `undo` and
-  `bpy.app.timers` work, which cannot be measured under `blender -b` at all. The
-  prompt says so, and says how to use a screen safely. It keeps the screenshot
-  rail: a run may *use* a screen, never *read* one.
-- **`AGENTS.md` contradicts Mode A.** It says "do not delegate to subagents",
-  which was written for ticket sessions resolving decisions. Step 0 resolves
-  that before any executor reads the file, because an executor that finds an
-  instruction forbidding its own existence will improvise.
+- **Screens and delegation are both allowed** — project owner, 2026-09-26.
+  Build tickets include `undo` and `bpy.app.timers` work that cannot be measured
+  under `blender -b` at all, and several layout bugs on this effort were only
+  ever caught by looking at a screenshot. `AGENTS.md` was updated in the same
+  pass, so no executor reads a file that forbids its own existence.
 
 ## The prompt
 
@@ -61,19 +61,17 @@ one actually working.
 Read first: `AGENTS.md`, `docs/agents/issue-tracker.md`,
 `.scratch/blender-copilot-build/issues/`, and `docs/ratification.md`.
 
-**Pick one executor and name it out loud:**
+**Default to Mode A — you are already the orchestrator here.** Delegate each
+ticket to a subagent and keep every check for yourself.
 
-- **Mode A — subagents.** One `runSubagent` per ticket, foreground, one at a time.
+- **Mode A — subagents.** One subagent per ticket, one at a time. Call the
+  subagent tool with **no `agentName`**: the read-only agent (`Explore`) can read
+  but cannot implement, so naming it hands you an executor that cannot write.
 - **Mode B — pi.** `bash tools/build-ticket.sh <NN>`, one process at a time.
+  Prefer it when the ticket spends money — pi gets a clean process and the
+  launcher pre-flights the frontier itself.
 
 Never mix modes inside a ticket. Never run two tickets at once.
-
-**Step 0 — align the rails.** `AGENTS.md` says "Do not delegate to subagents."
-Mode A needs that verbatim line changed, so edit it to permit
-orchestrator→executor delegation while keeping *an executor does not delegate
-further* (nested subagents nest unpredictably). Commit that edit alone, before
-the first ticket, and say that you did. Without this every executor reads a file
-that forbids its own existence.
 
 **Then loop:**
 
@@ -121,10 +119,14 @@ running is not stale — read the log before touching it.
   past.
 - Bound every probe with `tools/bounded_run.py`. Never run a hang case in the
   foreground. macOS has no `timeout(1)`.
-- **Not headless-restricted.** An executor may run Blender with a window when the
-  check genuinely needs one — `bpy.app.timers` and undo do, nothing else does.
-  Background it, bound it, have the script quit Blender itself, write results to
-  a file. Never take a screenshot: seeing stays the human's job.
+- **Screens are allowed, screenshots included.** An executor may run Blender with
+  a window and read back what it drew whenever looking is the honest way to
+  check. The mechanics still apply, because they are about hangs rather than
+  screens: background it, bound it with `tools/bounded_run.py`, have the script
+  quit Blender itself, write results to a file.
+- **Delegation is allowed** (`AGENTS.md`, 2026-09-26). An executor may hand an
+  independent probe to a subagent of its own; what it may not do is hand off the
+  ticket itself — it owns that status line and that answer.
 
 **Report and stop:**
 
@@ -143,8 +145,11 @@ else.
 
 ## Verifying an executor yourself
 
+Mode A's record is the chat itself; Mode B writes a log you can reread. Both are
+checked the same way — by running the commands, not by reading the prose:
+
 ```sh
-tail -40 logs/build-01.log                        # what it said
+tail -40 logs/build-01.log                        # Mode B's transcript
 grep -E '^\*\*(Status|Triage|Blocked by):' .scratch/blender-copilot-build/issues/*.md
 git diff --stat                                   # what it actually changed
 git log --oneline -3                              # what the orchestrator committed

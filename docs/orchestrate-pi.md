@@ -74,8 +74,9 @@ reset it to `open` and retry it once. Then `git add -A && git commit`.
 - every PROVISIONAL decision, and exactly what a human must ratify
 - anything an instance failed to verify, or claimed without evidence
 
-Rails: do not resolve tickets yourself; do not run a fourth wave; never launch a
-GUI application or take a screenshot; never touch `/Users/user/Projects/blender`.
+Rails: do not resolve tickets yourself; do not run a fourth wave; never touch
+`/Users/user/Projects/blender`. Screens are allowed if a check needs one — bound
+it and background it (see `AGENTS.md`, owner change 2026-09-26).
 
 If you would rather not spend on a full run, stop after Wave 0 and Wave 1 and
 report — that covers every decision ticket that is currently unblocked.

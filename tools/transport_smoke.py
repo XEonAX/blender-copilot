@@ -7,8 +7,9 @@
         tools/transport_smoke.py
 
 **Why this exists.** `bpy.app.timers` never pump under `blender -b`, so the
-panel's repaint cannot be exercised headlessly at all - that part is the human's
-eye. Everything *under* the repaint can be: this drives the real
+panel's repaint cannot be exercised headlessly at all - that part needs a screen
+(AGENTS.md, screens allowed since 2026-09-26). Everything *under* the repaint can
+be: this drives the real
 `blender_copilot/transport.py` (the real worker subprocess, the real SSE stream,
 the real accumulation) and feeds every event through
 `conversation.Conversation.apply_event`, which is exactly what the drain timer

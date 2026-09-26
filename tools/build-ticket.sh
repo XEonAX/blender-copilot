@@ -165,18 +165,19 @@ Do this now, in order:
    finished without a human, set Status to "human-required", add a DO NOT CLAIM
    banner above the heading, and say exactly what a human must do.
 
-8. Touch nothing else. No git commands that write. No edits to another ticket.
-   No writes anywhere under /Users/user/Projects/blender. Do not delegate to
-   subagents.
+8. Touch nothing else. No git commands that write. No edits to another ticket -
+   you are its only owner. No writes anywhere under
+   /Users/user/Projects/blender. You may hand an independent probe to a
+   subagent, but you keep the ticket's status line and its answer.
 
 Bound every probe you run. Never run a case whose subject is a hang in the
 foreground. Chain checks with && and never with ;, so a failure stops the next
 step instead of being scrolled past.
 
-If a check genuinely needs a screen - bpy.app.timers, undo - you may run Blender
-with a window: background it, bound it, have the script quit Blender itself, and
-write results to a file rather than trusting the terminal. Do not take a
-screenshot; seeing stays the human's job.
+Screens are allowed: run Blender with a window whenever that is the honest way to
+check, and take a screenshot when looking at the result answers the question.
+Background it, bound it with tools/bounded_run.py, have the script quit Blender
+itself, and write results to a file rather than trusting the terminal.
 
 When finished, print a summary of at most 20 lines.
 EOF
