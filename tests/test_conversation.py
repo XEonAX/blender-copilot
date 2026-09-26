@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import signal
 import sys
 import time
@@ -1974,5 +1975,225 @@ short_session.cancel()
 
 long.clear()
 check("the chip goes when the record does", long.trimmed is False)
+
+
+# ==========================================================================
+# Which credential a request carries (decision 05, wired 2026-09-26).
+#
+# `transport.config()` is the only function that decides, and it layers
+# **preference -> environment -> default**. Two properties matter more than the
+# individual layers, and both are checked here rather than assumed:
+#
+#   * the env-only call is unchanged, because every probe that predates the
+#     preferences calls it with no argument - and the base URL's default must NOT
+#     apply there, or a probe holding a faked key would be pointed at a real host
+#     by nothing more than a missing variable;
+#   * "neither" produces a sentence naming *both* routes, since a bare "not
+#     configured" leaves the user unable to tell a missing setting from a wrong
+#     screen. Ticket 05 §3.
+# ==========================================================================
+print("\n-- the transport config layering --")
+
+_transport_spec = importlib.util.spec_from_file_location(
+    "transport", _HERE.parent / "blender_copilot" / "transport.py"
+)
+assert _transport_spec and _transport_spec.loader
+transport = importlib.util.module_from_spec(_transport_spec)
+_transport_spec.loader.exec_module(transport)
+
+
+class FakePrefs:
+    """`BlenderCopilotPreferences` minus RNA: the same three field names.
+
+    `_pref` reads them with `getattr(..., "")`, so this is the whole interface
+    `config` needs from an add-on's preferences.
+    """
+
+    def __init__(self, api_key="", base_url="", model=""):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+
+
+KEY_VAR, URL_VAR, MODEL_VAR = transport.KEY_ENV, transport.URL_ENV, transport.MODEL_ENV
+
+# What the suite was started with, put back at the end. In-process only - a child
+# cannot change its parent's environment - but this file is also the place a
+# future check would read these variables, and leaving them blanked is exactly how
+# a test becomes order-dependent.
+_ORIGINAL_ENV = {name: os.environ.get(name) for name in (KEY_VAR, URL_VAR, MODEL_VAR)}
+
+
+def credentials(api_key=None, url=None, model=None):
+    """Set exactly these three variables - `None` means unset, never empty."""
+    for name, value in ((KEY_VAR, api_key), (URL_VAR, url), (MODEL_VAR, model)):
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def restore_credentials():
+    for name, value in _ORIGINAL_ENV.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+# -- the preference wins, all three of them -------------------------------
+credentials(api_key="env-key", url="https://env.example", model="env-model")
+preference = FakePrefs(api_key="pref-key", base_url="https://pref.example", model="pref-model")
+chosen = transport.config(preference)
+check("a preference's key beats the environment", chosen.api_key == "pref-key")
+check("a preference's URL beats the environment", chosen.base_url == "https://pref.example")
+check("a preference's model beats the environment", chosen.model == "pref-model")
+check(
+    "and the config says which route each came from",
+    (chosen.key_source, chosen.url_source, chosen.model_source)
+    == (transport.FROM_PREFS, transport.FROM_PREFS, transport.FROM_PREFS),
+)
+check("a set preference is no problem at all", chosen.problem == "")
+
+# -- the environment fills in whatever the preference left empty ----------
+half = transport.config(FakePrefs(api_key="pref-key"))
+check("an empty URL field falls back to the environment", half.base_url == "https://env.example")
+check("and so does an empty model field", half.model == "env-model")
+check(
+    "with the source reported as the environment, not as the field",
+    (half.url_source, half.model_source) == (transport.FROM_ENV, transport.FROM_ENV),
+)
+
+# -- the default is last, and only for the in-Blender route ---------------
+bare = transport.config(FakePrefs())
+credentials()
+empty_prefs = transport.config(FakePrefs())
+check(
+    "the base URL's default applies when a preferences object is given",
+    empty_prefs.base_url == transport.DEFAULT_BASE_URL,
+)
+check("and it is the last layer, so nothing is overridden by it",
+    empty_prefs.url_source == transport.FROM_DEFAULT)
+check(
+    "the model's default is the measured one, not the retired name",
+    empty_prefs.model == transport.DEFAULT_MODEL == "deepseek-flash",
+)
+check("a default is not a configured credential", bool(empty_prefs.problem))
+
+# -- the message names both routes ---------------------------------------
+credentials()
+unconfigured = transport.config(FakePrefs())
+check(
+    "the missing-key message names the preferences route",
+    "Add-ons \u25b8 Copilot" in unconfigured.problem,
+)
+check(
+    "and the shell route, with the exact incantation",
+    "set -a; . ./.env; set +a" in unconfigured.problem,
+)
+check(
+    "and the variable whose absence caused it",
+    transport.KEY_ENV in unconfigured.problem,
+)
+check(
+    "the key itself is never in the message",
+    "sk-" not in unconfigured.problem,
+)
+
+# -- the env-only call still behaves exactly as it shipped ---------------
+credentials(api_key="env-key", url="https://env.example", model="env-model")
+env_only = transport.config()
+check("env-only still reads the environment", env_only.api_key == "env-key")
+check("including the URL", env_only.base_url == "https://env.example")
+check(
+    "and it reports the environment as the source",
+    env_only.key_source == transport.FROM_ENV and env_only.problem == "",
+)
+
+credentials()
+nothing = transport.config()
+check(
+    "env-only with nothing set does NOT invent a base URL",
+    nothing.base_url == "" and bool(nothing.problem),
+)
+check(
+    "so a probe with a faked key can never be sent to a real host by omission",
+    transport.DEFAULT_BASE_URL not in (nothing.base_url or ""),
+)
+check("and that message names both routes too", "set -a; . ./.env; set +a" in nothing.problem)
+
+# -- the fingerprint, which is what a human is shown ----------------------
+check("a fingerprint is the last four characters", transport.fingerprint("sk-abc123XYZ") == "\u2026" + "3XYZ")
+check("an absent key fingerprints as unset", transport.fingerprint("") == "not set")
+check(
+    "a key too short to fingerprint is not revealed",
+    "abc" not in transport.fingerprint("abc"),
+)
+described = transport.config(FakePrefs(api_key="sk-secret-ABCD1234")).describe()
+check("describe names all three sources", described.startswith("key: prefs "))
+check("and carries no more than four characters of the key", "ABCD1234" not in described and "1234" in described)
+check("while the never-secret URL and model are shown", "http" in described and "deepseek-flash" in described)
+check("a repr of the config prints a length, never the key", "secret" not in repr(empty_prefs))
+
+# -- normalisation -------------------------------------------------------
+credentials(api_key="k", url="https://env.example/")
+check("a trailing slash is stripped so the path cannot double", transport.config().base_url == "https://env.example")
+
+credentials()
+check(
+    "an empty preference field is not a set field",
+    transport.config(FakePrefs(api_key="   ")).key_source == transport.FROM_NONE,
+)
+
+# -- the per-request output ceiling --------------------------------------
+# Follows VS Code's Copilot extension: the limit is a property of the *model* and
+# every request asks for that model's maximum (`chatMLFetcher.ts`:
+# `max_tokens: chatEndpoint.maxOutputTokens`), with a declared fallback for a model
+# that has none (`openRouterProvider.ts`). It is checked here because the failure
+# it replaces was invisible in every other test: a 2,048-token cap silently spent
+# on thinking ended a live turn with an empty transcript.
+credentials(api_key="k", url="https://env.example")
+check(
+    "a known model resolves to its own ceiling",
+    transport.max_output_tokens("deepseek-flash") == transport.MAX_OUTPUT_TOKENS["deepseek-flash"],
+)
+check(
+    "both documented models carry a ceiling",
+    set(transport.MAX_OUTPUT_TOKENS) == {"deepseek-flash", "deepseek-v4-pro"},
+)
+check(
+    "an unknown model falls back to the family's documented maximum",
+    transport.max_output_tokens("some-gateway-alias") == transport.DEFAULT_MAX_OUTPUT_TOKENS,
+)
+check(
+    "a config carries that ceiling, so the worker asks for it per request",
+    transport.config(FakePrefs(model="deepseek-flash")).max_tokens == 384_000,
+)
+check(
+    "and a hand-built config does too, which is what the wire probe uses",
+    transport.Config("http://127.0.0.1:1", "k", "deepseek-flash", "").max_tokens == 384_000,
+)
+check(
+    "the ceiling is not a cap that can truncate a turn's thinking",
+    transport.DEFAULT_MAX_OUTPUT_TOKENS >= 100_000,
+)
+
+# The human's path, exactly: the key typed into the preferences page and nothing
+# in the environment. A Blender launched from the Finder has no `.env`, so this is
+# the configuration the acceptance test is actually run under - and it has to be
+# complete, with no problem message, because the alternative is a first run that
+# asks the user to also know an endpoint URL.
+credentials()
+field_only = transport.config(FakePrefs(api_key="sk-from-the-field"))
+check("a key in the field alone is a complete configuration", field_only.problem == "")
+check("with the documented endpoint filled in as the last layer", field_only.base_url == transport.DEFAULT_BASE_URL)
+check("and the measured model as the last layer", field_only.model == "deepseek-flash")
+check("and the field reported as where the key came from", field_only.key_source == transport.FROM_PREFS)
+check(
+    "and the environment did not have to be involved at all",
+    (field_only.url_source, field_only.model_source) == (transport.FROM_DEFAULT, transport.FROM_DEFAULT),
+)
+
+restore_credentials()
 
 print("\nall checks passed")

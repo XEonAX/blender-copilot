@@ -120,14 +120,15 @@ CURRENT_TURN_RESERVE_BYTES = 30_000
 def _output_reserve_tokens() -> int:
     """What one round asks the provider for, from the module that asks for it.
 
-    Read rather than copied: `transport.MAX_TOKENS` is the shipped cap, and a
-    budget derived from a number that only looked right once is how the reserves
-    would silently stop covering the reply.
+    Read rather than copied: `transport.DEFAULT_MAX_OUTPUT_TOKENS` is the ceiling
+    `transport.config()` hands a real request (per model, from the model's own
+    documented maximum), and a budget derived from a number that only looked right
+    once is how the reserves would silently stop covering the reply.
     """
     try:
-        return int(_sibling("transport").MAX_TOKENS)
+        return int(_sibling("transport").DEFAULT_MAX_OUTPUT_TOKENS)
     except Exception:  # noqa: BLE001 - the derivation must not depend on an import
-        return 2_048
+        return 384_000
 
 
 OUTPUT_RESERVE_TOKENS = _output_reserve_tokens()

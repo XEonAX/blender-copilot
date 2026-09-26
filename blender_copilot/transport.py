@@ -54,6 +54,13 @@ URL_ENV = "DEEPSEEK_API_URL"
 KEY_ENV = "DEEPSEEK_API_KEY"
 MODEL_ENV = "DEEPSEEK_MODEL"
 
+# Where each value came from, for the one label the preferences page and the
+# probes print. Never the value itself - see `fingerprint`.
+FROM_PREFS = "prefs"
+FROM_ENV = "env"
+FROM_DEFAULT = "default"
+FROM_NONE = "not set"
+
 # The provider's *current* small-model name, measured live in ticket 16 - the
 # response echoed `deepseek-flash` back. Deliberately not the legacy
 # `deepseek-v4-flash`, which that same run showed is accepted while silently
@@ -61,22 +68,124 @@ MODEL_ENV = "DEEPSEEK_MODEL"
 # and why `DEEPSEEK_MODEL` overrides it rather than the reverse.
 DEFAULT_MODEL = "deepseek-flash"
 
-# Thinking is on by default and billed as completion tokens (ticket 16: 64 of 64
-# in one probe), so a small cap can be spent entirely on reasoning and return an
-# empty visible reply. 2,048 tokens is roughly $0.0012 of output at Flash rates.
-MAX_TOKENS = 2048
+# The endpoint's own default, and the **last** layer only: a preference or
+# `DEEPSEEK_API_URL` beats it, and it is not applied at all on the env-only path
+# (`config()` with no preferences), so no existing probe can be pointed at a real
+# host by a missing variable. Ticket 16 read this string from
+# `api-docs.deepseek.com` as the provider's documented default rather than
+# recalling it, and it is the value this repo's own `.env` uses - which is the
+# point, because the alternative is a human launching Blender from the Finder and
+# being asked to type a base URL before anything works. `AGENTS.md` says never
+# hard-code this; that rail is about *probes guessing an endpoint*, and this is
+# the documented one, one layer below both overrides.
+DEFAULT_BASE_URL = "https://api.deepseek.com"
+
+# ---------------------------------------------------------------------------
+# The per-request output ceiling.
+#
+# Ticket 16 measured the two things this has to respect: thinking is on by
+# default and is billed as completion tokens (25 of 64 in one probe, 64 of 64 in
+# another), and it shares the output budget with the visible reply *and* with the
+# code inside a tool call. So a small cap does not shorten a reply - it deletes a
+# turn. That was not hypothetical: `tools/live_turn_probe.py`'s first live run,
+# 2026-09-26, asked for a football and came back `finish_reason=length` in 10.1s
+# with an empty transcript and no tool call at all. The entire 2,048-token cap
+# went on reasoning the code never saw.
+#
+# The fix follows how VS Code's own Copilot extension sets a request's limit:
+# the ceiling is a property of the **model**, resolved per request, and the
+# request asks for that model's maximum rather than for a number picked by hand.
+#
+#   * `extensions/copilot/src/extension/prompt/node/chatMLFetcher.ts` -
+#     `const maxResponseTokens = chatEndpoint.maxOutputTokens;` then
+#     `requestOptions = { max_tokens: maxResponseTokens, ...requestOptions }`,
+#     i.e. every request defaults to the selected model's own output limit.
+#   * `extensions/copilot/src/extension/byok/vscode-node/openRouterProvider.ts` -
+#     the model's declared `max_completion_tokens`, falling back to a
+#     `DEFAULT_MAX_OUTPUT_TOKENS` constant when the model declares none.
+#
+# The numbers below are the DeepSeek family's documented maximum output (ticket
+# 16's table, read from `api-docs.deepseek.com`: 1M-token context, 384K max
+# output), and 384,000 is **measured accepted**, not assumed: the third live run
+# sent it to `deepseek-flash` and completed the whole turn in 37.6s.
+#
+# That provider also clamps to half the context window, which is a no-op here -
+# 384K of a 1M window - so this does not repeat the clamp, because doing so would
+# mean copying the window constant into the one module that deliberately knows
+# nothing about budgets (`context.py` owns it, and reads this module the other
+# way round). A ceiling that ever exceeded half a window would be a table entry to
+# fix, not a formula to add.
+MAX_OUTPUT_TOKENS = {
+    "deepseek-flash": 384_000,
+    "deepseek-v4-pro": 384_000,
+}
+DEFAULT_MAX_OUTPUT_TOKENS = 384_000
+
+
+def max_output_tokens(model: str) -> int:
+    """The ceiling to ask for, for *this* model.
+
+    An unrecognised model string - a name from next quarter, or a local gateway's
+    alias - gets the family's documented maximum rather than a small conservative
+    number. Both directions have a failure mode: over-asking makes a provider that
+    disagrees say so with a 400 naming the parameter, which is loud, cheap and
+    fixable on the spot; under-asking silently spends a whole request on reasoning
+    and ends the turn, which is exactly what this replaced. The reference makes the
+    *user* declare the number for a custom endpoint; here the model field carries
+    the name and this table carries the ceilings.
+    """
+    return MAX_OUTPUT_TOKENS.get((model or "").strip(), DEFAULT_MAX_OUTPUT_TOKENS)
 
 
 class Config:
     """Everything needed to make a request, and whether it is all there."""
 
-    __slots__ = ("base_url", "api_key", "model", "problem")
+    __slots__ = (
+        "base_url",
+        "api_key",
+        "model",
+        "problem",
+        "key_source",
+        "url_source",
+        "model_source",
+        "max_tokens",
+    )
 
-    def __init__(self, base_url: str, api_key: str, model: str, problem: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        problem: str,
+        key_source: str = FROM_NONE,
+        url_source: str = FROM_NONE,
+        model_source: str = FROM_NONE,
+        max_tokens: int | None = None,
+    ) -> None:
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
         self.problem = problem
+        self.key_source = key_source
+        self.url_source = url_source
+        self.model_source = model_source
+        # Resolved here from the model, so a `Config` built by hand - which is
+        # what `tools/loop_wire_probe.py` does for its scripted provider - still
+        # carries a sane ceiling instead of zero.
+        self.max_tokens = int(max_tokens) if max_tokens else max_output_tokens(model)
+
+    def describe(self) -> str:
+        """Which route each value came from, for a human to read.
+
+        The key appears as its last four characters at most (`fingerprint`), the
+        way ticket 05 §2 asks: enough to tell two keys apart while rotating, not
+        enough to be a leak. The URL and the model are not secret.
+        """
+        return (
+            f"key: {self.key_source} {fingerprint(self.api_key)}"
+            f" | url: {self.url_source} {self.base_url or 'not set'}"
+            f" | model: {self.model_source} {self.model or 'not set'}"
+        )
 
     def __repr__(self) -> str:  # never let a stray repr print the key
         return (
@@ -85,30 +194,120 @@ class Config:
         )
 
 
-def config() -> Config:
-    """Read the endpoint from the environment.
+def fingerprint(secret: str) -> str:
+    """`…A1B2` - the last four characters, or `not set` when there is nothing.
 
-    A `.env` is **not** read automatically - by Blender, or by this addon - so
-    the launching shell has to have loaded it (`set -a; . ./.env; set +a`). The
-    message below says exactly that, because "why does Send do nothing" is the
-    least interesting bug in the project.
+    The whole point is that it cannot reconstruct the value, so it is safe on a
+    label and in a probe log. A key shorter than four characters fingerprints to
+    the bullets rather than to itself.
     """
-    base_url = (os.environ.get(URL_ENV) or "").strip().rstrip("/")
-    api_key = (os.environ.get(KEY_ENV) or "").strip()
-    model = (os.environ.get(MODEL_ENV) or "").strip() or DEFAULT_MODEL
+    secret = (secret or "").strip()
+    if not secret:
+        return "not set"
+    if len(secret) <= 4:
+        return "\u2026????"
+    return "\u2026" + secret[-4:]
+
+
+def _pref(prefs, name: str) -> str:
+    """One preference as a stripped string, or `""`.
+
+    Never raises: `prefs` is `None` for every probe that calls `config()` with no
+    argument, a stub `SimpleNamespace` in `tools/panel_draw_smoke.py`, and a real
+    `AddonPreferences` in Blender. A missing field means "not set here", which is
+    exactly what makes the next layer apply.
+    """
+    try:
+        return str(getattr(prefs, name, "") or "").strip()
+    except Exception:  # noqa: BLE001 - an unreadable preference is an empty one
+        return ""
+
+
+def _not_configured(missing: list[tuple[str, str]]) -> str:
+    """The sentence that answers "why did Send do nothing?".
+
+    Both routes are named, always. Ticket 05 §3 rejected `self.report` as the
+    surface precisely because the interesting failure here is a user who cannot
+    tell whether they are missing a setting or looking at the wrong screen: a bare
+    "not configured" is the least interesting bug in the project. So: the field to
+    fill in, and the shell incantation, in one string - and the variable's name,
+    because a user who set it in `.zshrc` needs to be told that a Dock launch does
+    not see it (ticket 05: launchd does not inherit the shell's environment).
+    """
+    if not missing:
+        return ""
+    parts = " and ".join(f"{what} ({name})" for what, name in missing)
+    return (
+        f"{parts} not set. Fill in the Copilot settings under Edit \u25b8 Preferences "
+        "\u25b8 Add-ons \u25b8 Copilot, or launch Blender from a shell that has the "
+        "repo's .env loaded:  set -a; . ./.env; set +a"
+    )
+
+
+def config(prefs=None) -> Config:
+    """Resolve the endpoint, layering **preference -> environment -> default**.
+
+    `prefs` is the add-on's `BlenderCopilotPreferences`, and passing it is what
+    makes a Blender launched from the Finder able to send at all - the credential
+    has no other way in, because Blender's Python has no keychain (ticket 05, and
+    the value is plaintext in `userpref.blend`; the field's own copy says so).
+
+    Called **with no argument** it is env-only, exactly as it shipped, and that is
+    load-bearing rather than tidy: every probe that predates the preferences calls
+    it that way, and a default endpoint in that path would send a probe with a
+    faked key to a real host. The base URL's default applies only when a
+    preferences object is supplied, which is the in-Blender route a human uses.
+
+    A `.env` is still **not** read automatically - by Blender, or by this addon -
+    so the launching shell has to have loaded it. The problem string says so.
+    """
+    pref_url = _pref(prefs, "base_url")
+    pref_key = _pref(prefs, "api_key")
+    pref_model = _pref(prefs, "model")
+    env_url = (os.environ.get(URL_ENV) or "").strip()
+    env_key = (os.environ.get(KEY_ENV) or "").strip()
+    env_model = (os.environ.get(MODEL_ENV) or "").strip()
+
+    if pref_url:
+        base_url, url_source = pref_url, FROM_PREFS
+    elif env_url:
+        base_url, url_source = env_url, FROM_ENV
+    elif prefs is not None:
+        base_url, url_source = DEFAULT_BASE_URL, FROM_DEFAULT
+    else:
+        base_url, url_source = "", FROM_NONE
+    # A trailing slash would produce `https://host//chat/completions`, which some
+    # gateways 404 rather than normalise.
+    base_url = base_url.rstrip("/")
+
+    if pref_key:
+        api_key, key_source = pref_key, FROM_PREFS
+    elif env_key:
+        api_key, key_source = env_key, FROM_ENV
+    else:
+        api_key, key_source = "", FROM_NONE
+
+    if pref_model:
+        model, model_source = pref_model, FROM_PREFS
+    elif env_model:
+        model, model_source = env_model, FROM_ENV
+    else:
+        model, model_source = DEFAULT_MODEL, FROM_DEFAULT
 
     missing = []
-    if not base_url:
-        missing.append(URL_ENV)
     if not api_key:
-        missing.append(KEY_ENV)
-    problem = ""
-    if missing:
-        problem = (
-            f"{' and '.join(missing)} not set. Launch Blender from a shell that has "
-            "the repo's .env loaded:  set -a; . ./.env; set +a"
-        )
-    return Config(base_url, api_key, model, problem)
+        missing.append(("The API key", KEY_ENV))
+    if not base_url:
+        missing.append(("The base URL", URL_ENV))
+    return Config(
+        base_url,
+        api_key,
+        model,
+        _not_configured(missing),
+        key_source,
+        url_source,
+        model_source,
+    )
 
 
 class Worker:
@@ -292,7 +491,11 @@ class Worker:
             "api_key": cfg.api_key,
             "model": cfg.model,
             "messages": messages,
-            "max_tokens": MAX_TOKENS,
+            # Per request, from the model's own ceiling (`config` resolved it):
+            # every round of a turn asks for the maximum the model offers, because
+            # thinking and the tool call's code both come out of it and a cap that
+            # runs out mid-thought ends the turn with nothing to show.
+            "max_tokens": cfg.max_tokens,
         }
         if tools:
             command["tools"] = tools

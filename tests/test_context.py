@@ -141,8 +141,8 @@ check(
     context.WINDOW_TOKENS == 1_000_000,
 )
 check(
-    "the output reserve is the cap this loop actually asks for, not a copied number",
-    context.OUTPUT_RESERVE_TOKENS == transport.MAX_TOKENS,
+    "the output reserve is the ceiling this loop actually asks for, not a copied number",
+    context.OUTPUT_RESERVE_TOKENS == transport.DEFAULT_MAX_OUTPUT_TOKENS,
 )
 check(
     "ticket 14 §1's arithmetic, on the 32k floor that budget was written against, "

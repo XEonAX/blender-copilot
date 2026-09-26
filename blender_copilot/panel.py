@@ -144,6 +144,44 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
         options={"TEXTEDIT_UPDATE"},
     )
 
+    # --- the credential (decision 05, ratified) -----------------------------
+    # This block is the answer to "where does the API key live": a PASSWORD
+    # field on the add-on preferences, which is masked on screen and **plaintext
+    # in `userpref.blend`**. 05 §1 accepted that trade out loud, because on macOS
+    # the alternative - the environment variable alone - means the user must
+    # launch Blender from a terminal forever (launchd does not inherit the
+    # shell's environment, measured), and a first run that cannot be fixed from
+    # inside Blender is exactly the failure the panel exists to avoid.
+    #
+    # `subtype="PASSWORD"` is display-layer masking only: Blender draws bullets
+    # and refuses to tooltip or copy the value, and Python still reads it
+    # verbatim. `options={"SKIP_SAVE"}` does **not** keep it out of the file
+    # (measured in 05: the secret appears in `userpref.blend` and survives a
+    # restart), so no field here is a safe place for a secret. `draw` says so in
+    # the UI rather than implying otherwise.
+    api_key: bpy.props.StringProperty(
+        name="API key",
+        description="Stored unencrypted in Blender's userpref.blend",
+        subtype="PASSWORD",
+    )
+
+    base_url: bpy.props.StringProperty(
+        name="Base URL",
+        description=(
+            "OpenAI-compatible endpoint, no trailing slash. Empty uses "
+            "DEEPSEEK_API_URL, else the provider's documented default"
+        ),
+    )
+
+    model: bpy.props.StringProperty(
+        name="Model",
+        description=(
+            "Model name. Empty uses DEEPSEEK_MODEL, else deepseek-flash. "
+            "A retired name is accepted and silently remapped, so prefer a "
+            "name from the provider's own docs"
+        ),
+    )
+
     layout_variant: bpy.props.EnumProperty(
         name="Layout",
         description="Prototype only: which conversation layout to render",
@@ -173,6 +211,59 @@ class BlenderCopilotPreferences(bpy.types.AddonPreferences):
         min=0,
         max=context.MAX_BUDGET_KIB,
     )
+
+    def draw(self, context):
+        """The settings page, so a human can actually fill the key in.
+
+        Reached from Edit ▸ Preferences ▸ Add-ons ▸ Copilot, which is the route a
+        Blender launched from the Finder can take - the panel sidebar is not the
+        only way in, because `layout.prop` needs a registered RNA owner and this
+        is it.
+
+        The plaintext warning is not boilerplate: `userpref.blend` is mode 0644 in
+        `~/Library/Application Support/Blender/5.2/config/`, readable by anything
+        that reads that file, and there is no scrub hook on this platform. A user
+        who does not want the key on disk leaves the field empty and exports the
+        variable instead, and this says so.
+        """
+        layout = self.layout
+        budget = wrap_budget(context)
+
+        box = layout.box()
+        box.label(text="API key", icon="LOCKED")
+        box.prop(self, "api_key", text="")
+        for line in conversation.wrap(
+            "Stored unencrypted in Blender's userpref.blend - masked on screen, "
+            "plaintext on disk. Leave it empty and export DEEPSEEK_API_KEY "
+            "instead if that trade is not acceptable; then the key is never "
+            "written by Blender at all.",
+            budget,
+        ):
+            box.label(text=line)
+
+        row = layout.row()
+        row.prop(self, "base_url", text="Base URL")
+        row = layout.row()
+        row.prop(self, "model", text="Model")
+        for line in conversation.wrap(
+            "Both are non-secret and may be left empty: the URL falls back to "
+            "DEEPSEEK_API_URL and then to the provider's documented default, and "
+            "the model to DEEPSEEK_MODEL and then to deepseek-flash. Model names "
+            "churn, and a retired name is accepted while silently serving "
+            "something else - prefer a name copied from the provider's live docs.",
+            budget,
+        ):
+            layout.label(text=line)
+
+        # Which route Send will actually use. This is 05 §2's "never show the key,
+        # show a fingerprint" - the last four characters, enough to tell two keys
+        # apart while rotating and not enough to be a leak - plus the two sources
+        # side by side, because "I set it in the panel and it still says env" is
+        # otherwise invisible.
+        live = layout.box()
+        live.label(text="Send will use", icon="INFO")
+        for line in conversation.wrap(transport.config(self).describe(), budget):
+            live.label(text=line)
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +301,11 @@ class BLENDER_COPILOT_OT_send(bpy.types.Operator):
             self.report({"INFO"}, "Nothing to send")
             return {"CANCELLED"}
 
-        config = transport.config()
+        # With the preferences, so a Blender launched from the Finder can send:
+        # `transport.config()` with no argument is the env-only path the probes
+        # use, and this is the in-Blender one. The problem string names both
+        # routes rather than only the shell.
+        config = transport.config(settings)
         if config.problem:
             session.set_transport_error(config.problem)
             stream.tag_view3d_redraw()
@@ -271,10 +366,12 @@ class BLENDER_COPILOT_OT_retry_transport(bpy.types.Operator):
     def execute(self, context):
         transport.worker.reset()
         conversation.session.set_transport_error(None)
-        # Re-read the environment rather than assume: a missing variable is the
-        # most likely reason the worker would not run, and it is better to say
-        # so again than to let Send fail silently twice.
-        config = transport.config()
+        # Re-read the settings rather than assume: a missing key is the most
+        # likely reason the worker would not run, and it is better to say so
+        # again than to let Send fail silently twice - which is also why this
+        # re-reads the preferences, since a user who just filled the field in is
+        # exactly who presses Retry.
+        config = transport.config(prefs(context))
         if config.problem:
             conversation.session.set_transport_error(config.problem)
         stream.tag_view3d_redraw()

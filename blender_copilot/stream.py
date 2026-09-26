@@ -54,6 +54,22 @@ from . import conversation, context, prompt, scope, toolbox, transport, undo_ble
 TICK = 0.05
 
 
+def _prefs():
+    """The add-on's preferences, or `None`.
+
+    Read here rather than passed in because the loop's sender is a module-level
+    callback with no context: `conversation.attach` takes one argument and the
+    whole point of that seam is that the bpy-free module never sees a context.
+    Never raises - a background check, a stub context or a missing add-on means
+    "no preferences", which leaves `transport.config` on its environment route.
+    """
+    try:
+        addon = bpy.context.preferences.addons.get(__package__)
+    except Exception:  # noqa: BLE001 - no window, no preferences, no add-on
+        return None
+    return addon.preferences if addon else None
+
+
 def _send_round(messages: list[dict]) -> str | None:
     """One request for the loop, over the worker's pipe.
 
@@ -61,8 +77,12 @@ def _send_round(messages: list[dict]) -> str | None:
     the first: the config is re-read each time, and the tool schemas ride along
     every round, since a round that does not declare them is a round the model
     cannot call anything from.
+
+    The preferences go in so that a round two of a turn started with an in-panel
+    key keeps working, and so that a key the user fixes mid-turn is picked up on
+    the next round rather than at the next Send.
     """
-    config = transport.config()
+    config = transport.config(_prefs())
     if config.problem:
         return config.problem
     return transport.worker.send(config, messages, toolbox.SCHEMAS)
